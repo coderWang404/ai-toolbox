@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// codex-hotswitch — 不重启 Codex 应用，热切换 cc-switch 管理的第三方模型供应商。
+// ai-toolbox — 不重启 Codex 应用，热切换 cc-switch 管理的第三方模型供应商。
 import { parseArgs } from "node:util";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -24,29 +24,48 @@ import {
   applyClaudeDesktopProvider,
   syncClaudeDesktopCurrent,
   restartClaudeDesktop,
+  syncDesktopFromCcSwitch,
   claudeDesktopSummary,
   claudeDesktopProfilePath,
 } from "../src/claude-desktop.mjs";
 import { findCodexBinary, readEffectiveConfig } from "../src/verify-client.mjs";
+import { findIqProvider, listIqProviders, publicIqProvider, resolveThinking } from "../src/iq-catalog.mjs";
+import { iqTopic, runIqTest } from "../src/iq-runtime.mjs";
+import { addKeys, applySelectedKey, listKeys, parseKeyText, queryAll, removeKey, setPlan } from "../src/go-quota.mjs";
+import { addKeys as addClineKeys, listKeys as listClineKeys, parseKeyText as parseClineKeyText, queryAll as queryClineQuota, removeKey as removeClineKey } from "../src/cline-quota.mjs";
+import { completeChat, startServer, status as grokStatus } from "../src/grok-bot.mjs";
+import { networkInfo, runSpeedTest } from "../src/net-speed.mjs";
 import { readFileSync } from "node:fs";
 import { codexConfigPath, codexHome, ccSwitchDbPath } from "../src/paths.mjs";
 
-const HELP = `codex-hotswitch — 不重启 Codex，热切换第三方模型供应商
+const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
 用法:
-  codex-hotswitch list                  列出所有 codex 供应商
-  codex-hotswitch current               查看当前供应商与生效配置
-  codex-hotswitch switch <名称/ID>      切换供应商并热重启 Codex（核心命令）
-  codex-hotswitch reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
-  codex-hotswitch watch                 持续监控配置，切换后自动热重启（推荐常驻）
-  codex-hotswitch sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
-  codex-hotswitch remote-status         查看远程正在使用的供应商和密钥尾号
-  codex-hotswitch sync-ccswitch         把本机 cc-switch 配置同步到远程（连不上则等待重试）
-  codex-hotswitch claude-list            列出 Claude Desktop 供应商
-  codex-hotswitch claude-current         查看 Claude Desktop 正在使用的网关
-  codex-hotswitch claude-switch <名称>   切换 Claude Desktop 供应商并重新打开应用
-  codex-hotswitch claude-reload          cc-switch 已切换后，重新打开 Claude Desktop
-  codex-hotswitch doctor                检查运行环境
+  ai-toolbox list                  列出所有 codex 供应商
+  ai-toolbox current               查看当前供应商与生效配置
+  ai-toolbox switch <名称/ID>      切换供应商并热重启 Codex（核心命令）
+  ai-toolbox reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
+  ai-toolbox watch                 持续监控配置，切换后自动热重启（推荐常驻）
+  ai-toolbox sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
+  ai-toolbox remote-status         查看远程正在使用的供应商和密钥尾号
+  ai-toolbox sync-ccswitch         把本机 cc-switch 配置同步到远程（连不上则等待重试）
+  ai-toolbox claude-list            列出 Claude Desktop 供应商
+  ai-toolbox claude-current         查看 Claude Desktop 正在使用的网关
+  ai-toolbox claude-switch <名称>   切换 Claude Desktop 供应商并重新打开应用
+  ai-toolbox claude-reload          cc-switch 已切换后，重新打开 Claude Desktop
+  ai-toolbox claude-sync            以 cc-switch 当前项为准，写回桌面网关并在需要时重新打开
+  ai-toolbox iq-list               列出可用 OpenAI 协议的供应商和模型
+  ai-toolbox iq-run <供应商>       用最小运行时测试模型（--model 指定模型）
+  ai-toolbox go-keys               列出本机保存的 OpenCode Go 密钥（只显示尾号）
+  ai-toolbox go-keys-use <id>      把这把密钥写入 cc-switch、Kimi Code、OpenCode 和 DeepSeek Harness，不改模型
+  ai-toolbox go-quota              查询全部密钥的官方三窗口额度
+  ai-toolbox cline-keys            列出本机保存的 ClinePass 密钥（只显示尾号）
+  ai-toolbox cline-quota           查询全部 ClinePass 密钥的三窗口额度和余额
+  ai-toolbox grok-status           读取本机 Grok Bot 登录、助手和网关状态
+  ai-toolbox grok-serve            在 127.0.0.1:8765 启动 OpenAI 兼容网关
+  ai-toolbox net-info              查看当前网络接口、地址和出口
+  ai-toolbox net-speed             测延迟、下载和上传，并持续输出过程
+  ai-toolbox doctor                检查运行环境
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -54,7 +73,7 @@ const HELP = `codex-hotswitch — 不重启 Codex，热切换第三方模型供�
   --hard                跳过平滑退出，直接强制结束
   --force               cc-switch 正在运行时，仍强制从命令行切换（有卡片错位风险）
   --no-reload           只写配置，不重启 Codex
-  --no-remote           不同步远程机器（内置机器见 src/remotes.json，自定义见 ~/.codex-hotswitch/remotes.json）
+  --no-remote           不同步远程机器（内置机器见 src/remotes.json，自定义见 ~/.ai-toolbox/remotes.json）
   --dry-run             只展示将写入的配置，不落盘
   --focus / --no-focus  重启后是否把 ChatGPT 窗口切到前台（默认 focus）
   --json                以 JSON 输出（供桌面 App / 脚本调用）
@@ -113,6 +132,7 @@ export function providerSummary(p) {
     baseUrl,
     host: hostOf(baseUrl),
     tokenTail: tokenTailOf(p.auth?.OPENAI_API_KEY),
+    token: p.auth?.OPENAI_API_KEY || null,
   };
 }
 
@@ -130,7 +150,7 @@ function liveProviderInfo(configText) {
       if (header.test(lines[i])) { start = i; break; }
     }
   }
-  if (start === -1) return { providerId, baseUrl: null, tokenTail: null, host: null, model: null };
+  if (start === -1) return { providerId, baseUrl: null, tokenTail: null, token: null, host: null, model: null };
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
     if (/^\s*\[/.test(lines[i])) { end = i; break; }
@@ -142,6 +162,7 @@ function liveProviderInfo(configText) {
     providerId,
     baseUrl,
     tokenTail: tokenTailOf(token),
+    token,
     host: hostOf(baseUrl),
     model: configText.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] ?? null,
   };
@@ -160,7 +181,7 @@ function printProviderTable(summaries, currentId) {
     const host = p.host ? ` | ${p.host}` : "";
     console.log(`  ${mark} ${p.name}${pad}  model=${p.model ?? "-"}${host}${catalog}  [${p.id}]`);
   }
-  console.log("\n  ● = 当前供应商。切换: codex-hotswitch switch <名称>");
+  console.log("\n  ● = 当前供应商。切换: ai-toolbox switch <名称>");
 }
 
 async function effectiveConfig() {
@@ -326,11 +347,11 @@ async function cmdSwitch(query, opts) {
   const { log } = opts;
   const provider = findProvider(query);
   if (!provider) {
-    throw new Error(`找不到供应商「${query}」。可用: codex-hotswitch list`);
+    throw new Error(`找不到供应商「${query}」。可用: ai-toolbox list`);
   }
   if (isOfficialProvider(provider)) {
     throw new Error(
-      `「${provider.name}」是官方供应商，涉及 ChatGPT 登录态（auth.json），请用 cc-switch 界面切换，然后运行 codex-hotswitch reload`,
+      `「${provider.name}」是官方供应商，涉及 ChatGPT 登录态（auth.json），请用 cc-switch 界面切换，然后运行 ai-toolbox reload`,
     );
   }
 
@@ -488,7 +509,7 @@ async function cmdClaudeCurrent(opts) {
 
 async function cmdClaudeSwitch(query, opts) {
   const provider = findClaudeDesktopProvider(query);
-  if (!provider) throw new Error(`找不到 Claude Desktop 供应商「${query}」。可用: codex-hotswitch claude-list`);
+  if (!provider) throw new Error(`找不到 Claude Desktop 供应商「${query}」。可用: ai-toolbox claude-list`);
   if (!provider.hasConfig) {
     throw new Error(`「${provider.name}」不能写成直连网关。请在 cc-switch 里切换官方登录或需要本地代理的供应商。`);
   }
@@ -511,6 +532,14 @@ async function cmdClaudeSwitch(query, opts) {
   return { command: "claude-switch", provider: claudeDesktopSummary(provider), profile, synced: true, reload };
 }
 
+async function cmdClaudeSync(opts) {
+  const result = await syncDesktopFromCcSwitch({ log: opts.log });
+  if (result.current) opts.log(`\n以 cc-switch 为准: ${result.current.name}`);
+  if (result.reason) opts.log(`  ${result.reason}`);
+  else if (!result.applied && !result.reload) opts.log("  桌面网关已与 cc-switch 一致");
+  return { command: "claude-sync", ...result };
+}
+
 async function cmdClaudeReload(opts) {
   const providers = listClaudeDesktopProviders();
   const currentId = currentClaudeDesktopId();
@@ -526,6 +555,31 @@ async function cmdClaudeReload(opts) {
     profile,
     reload,
   };
+}
+
+async function cmdIqList(opts) {
+  const providers = (await listIqProviders()).map(publicIqProvider);
+  for (const provider of providers) {
+    opts.log(`${provider.name} [${provider.appType}] ${provider.models.map((item) => item.id).join(", ")}`);
+  }
+  return { command: "iq-list", providers };
+}
+
+async function cmdIqRun(query, opts) {
+  const provider = findIqProvider(query);
+  if (!provider) throw new Error(`找不到供应商「${query}」。可用: ai-toolbox iq-list`);
+  const known = provider.models.map((item) => item.id);
+  const model = opts.model || known[0];
+  const spec = provider.models.find((item) => item.id === model);
+  if (!spec && opts.model) provider.models.push({ id: model, ...resolveThinking(model) });
+  const thinking = opts.thinking || spec?.defaultThinking || "off";
+  const topic = iqTopic(opts.topic);
+  const progress = (line) => console.error(line);
+  const result = await runIqTest({ provider, model, thinking, topic: topic.id, log: progress });
+  opts.log(`\n${provider.name} / ${model}`);
+  opts.log(result.htmlPath ? `HTML: ${result.htmlPath}` : "没有生成 HTML");
+  opts.log(`用时 ${Math.round(result.elapsedMs / 1000)} 秒，${result.stopReason}`);
+  return { command: "iq-run", ...result, provider: publicIqProvider(provider) };
 }
 
 async function cmdWatch(opts) {
@@ -578,6 +632,75 @@ function cmdDoctor(opts) {
   return { command: "doctor", checks, failed };
 }
 
+async function readStdinJson() {
+  if (process.stdin.isTTY) return {};
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  if (!text) return {};
+  return JSON.parse(text);
+}
+
+function cmdGoKeys() {
+  return { command: "go-keys", keys: listKeys() };
+}
+
+async function cmdGoKeysAdd() {
+  const body = await readStdinJson();
+  const plan = body.plan === "plus" ? "plus" : "go";
+  const entries = body.text != null ? parseKeyText(body.text) : [{ name: body.name, key: body.key }];
+  const result = addKeys(entries, plan);
+  return { command: "go-keys-add", keys: result.keys, added: result.added };
+}
+
+function cmdGoKeysRemove(id) {
+  if (!id) throw new Error("用法: ai-toolbox go-keys-remove <id>");
+  return { command: "go-keys-remove", keys: removeKey(id) };
+}
+
+function cmdGoKeysPlan(id, plan) {
+  if (!id || !plan) throw new Error("用法: ai-toolbox go-keys-plan <id> <go|plus>");
+  return { command: "go-keys-plan", keys: setPlan(id, plan) };
+}
+
+async function cmdGrokStatus() {
+  return grokStatus();
+}
+
+async function cmdGrokChat() {
+  const body = await readStdinJson();
+  const result = await completeChat({ model: body.model, text: body.text, messages: body.messages });
+  return { command: "grok-chat", ...result };
+}
+
+async function cmdGrokServe() {
+  const server = await startServer();
+  const address = server.address();
+  console.log(JSON.stringify({ ok: true, command: "grok-serve", port: address.port, baseUrl: `http://127.0.0.1:${address.port}/v1` }));
+  await new Promise(() => {});
+}
+
+function cmdClineKeys() {
+  return { command: "cline-keys", keys: listClineKeys() };
+}
+
+async function cmdClineKeysAdd() {
+  const body = await readStdinJson();
+  const entries = body.text != null ? parseClineKeyText(body.text) : [{ name: body.name, key: body.key }];
+  const result = addClineKeys(entries);
+  return { command: "cline-keys-add", keys: result.keys, added: result.added };
+}
+
+function cmdClineKeysRemove(id) {
+  if (!id) throw new Error("用法: ai-toolbox cline-keys-remove <id>");
+  return { command: "cline-keys-remove", keys: removeClineKey(id) };
+}
+
+async function cmdGoKeysUse(id) {
+  if (!id) throw new Error("用法: ai-toolbox go-keys-use <id>");
+  return applySelectedKey(id);
+}
+
 async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -594,6 +717,9 @@ async function main() {
       focus: { type: "boolean" },
       "no-focus": { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
+      model: { type: "string" },
+      thinking: { type: "string" },
+      topic: { type: "string" },
     },
   });
 
@@ -612,6 +738,9 @@ async function main() {
     dryRun: values["dry-run"],
     focus: values["no-focus"] ? false : values.focus !== false,
     hosts: values.host ?? [],
+    model: values.model,
+    thinking: values.thinking,
+    topic: values.topic,
   };
 
   const [command, arg] = positionals;
@@ -630,7 +759,7 @@ async function main() {
       result = await cmdCurrent(opts);
       break;
     case "switch":
-      if (!arg) throw new Error("用法: codex-hotswitch switch <名称/ID>");
+      if (!arg) throw new Error("用法: ai-toolbox switch <名称/ID>");
       result = await cmdSwitch(arg, opts);
       break;
     case "reload":
@@ -658,12 +787,67 @@ async function main() {
       result = await cmdClaudeCurrent(opts);
       break;
     case "claude-switch":
-      if (!arg) throw new Error("用法: codex-hotswitch claude-switch <名称/ID>");
+      if (!arg) throw new Error("用法: ai-toolbox claude-switch <名称/ID>");
       result = await cmdClaudeSwitch(arg, opts);
       break;
     case "claude-reload":
       result = await cmdClaudeReload(opts);
       break;
+    case "claude-sync":
+      result = await cmdClaudeSync(opts);
+      break;
+    case "iq-list":
+      result = await cmdIqList(opts);
+      break;
+    case "iq-run":
+      if (!arg) throw new Error("用法: ai-toolbox iq-run <供应商> --model <模型>");
+      result = await cmdIqRun(arg, opts);
+      break;
+    case "go-keys":
+      result = cmdGoKeys();
+      break;
+    case "go-keys-add":
+      result = await cmdGoKeysAdd();
+      break;
+    case "go-keys-remove":
+      result = cmdGoKeysRemove(arg);
+      break;
+    case "go-keys-plan":
+      result = cmdGoKeysPlan(arg, positionals[2]);
+      break;
+    case "go-keys-use":
+      result = await cmdGoKeysUse(arg);
+      break;
+    case "go-quota":
+      result = await queryAll();
+      break;
+    case "cline-keys":
+      result = cmdClineKeys();
+      break;
+    case "cline-keys-add":
+      result = await cmdClineKeysAdd();
+      break;
+    case "cline-keys-remove":
+      result = cmdClineKeysRemove(arg);
+      break;
+    case "cline-quota":
+      result = await queryClineQuota();
+      break;
+    case "grok-status":
+      result = await cmdGrokStatus();
+      break;
+    case "grok-chat":
+      result = await cmdGrokChat();
+      break;
+    case "grok-serve":
+      await cmdGrokServe();
+      return;
+    case "net-info":
+      result = await networkInfo();
+      break;
+    case "net-speed":
+      await runSpeedTest((event) => console.log(JSON.stringify(event)));
+      return;
     case "doctor":
       result = cmdDoctor(opts);
       break;

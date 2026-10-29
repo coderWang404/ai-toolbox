@@ -105,7 +105,7 @@ export function readEffectiveConfig({ codexBin, codexHome, timeoutMs = 20000 }) 
     (async () => {
       try {
         await request("initialize", {
-          clientInfo: { name: "codex-hotswitch", title: "verify", version: "1.0.0" },
+          clientInfo: { name: "ai-toolbox", title: "verify", version: "1.0.0" },
           capabilities: { experimentalApi: false },
         });
         child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "initialized", params: {} })}\n`);

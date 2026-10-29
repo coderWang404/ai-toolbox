@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Codex 热切换</string>
+    <string>AI 工具箱</string>
     <key>CFBundleDisplayName</key>
-    <string>Codex 热切换</string>
+    <string>AI 工具箱</string>
     <key>CFBundleExecutable</key>
-    <string>CodexHotSwitch</string>
+    <string>AIToolbox</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.codex-hotswitch</string>
+    <string>com.local.ai-toolbox</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

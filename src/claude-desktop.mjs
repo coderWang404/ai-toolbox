@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { ccSwitchDbPath, ccSwitchSettingsPath } from "./paths.mjs";
+import { dataFile, ccSwitchDbPath, ccSwitchSettingsPath } from "./paths.mjs";
 
 export const CLAUDE_DESKTOP_PROFILE_ID = "00000000-0000-4000-8000-000000157210";
 const OFFICIAL_ID = "claude-desktop-official";
@@ -81,17 +81,19 @@ export function listClaudeDesktopProviders() {
   }
   const rows = sqliteJson(
     db,
-    "SELECT id, name, is_current, settings_config FROM providers WHERE app_type='claude-desktop' ORDER BY sort_index, created_at",
+    "SELECT id, name, is_current, settings_config, meta FROM providers WHERE app_type='claude-desktop' ORDER BY sort_index, created_at",
   );
   return rows.map((row) => {
     const settings = parseSettings(row.settings_config);
+    const meta = parseSettings(row.meta);
     const env = settings.env && typeof settings.env === "object" ? settings.env : {};
     const baseUrl = typeof env.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL : null;
     const token = typeof env.ANTHROPIC_AUTH_TOKEN === "string" ? env.ANTHROPIC_AUTH_TOKEN : "";
     const model = typeof settings.model === "string"
       ? settings.model
       : (typeof env.ANTHROPIC_MODEL === "string" ? env.ANTHROPIC_MODEL : null);
-    const official = row.id === OFFICIAL_ID || !baseUrl;
+    const proxyMode = meta.claudeDesktopMode === "proxy";
+    const official = row.id === OFFICIAL_ID || (!baseUrl && !proxyMode);
     return {
       id: String(row.id),
       name: String(row.name),
@@ -99,13 +101,31 @@ export function listClaudeDesktopProviders() {
       model,
       catalogCount: 0,
       official,
-      hasConfig: !!baseUrl && !!token,
+      hasConfig: proxyMode || (!!baseUrl && !!token),
+      proxyMode,
       baseUrl,
       host: hostOf(baseUrl),
       tokenTail: tokenTail(token),
       env,
     };
   });
+}
+
+function claudeProxyEndpoint() {
+  const db = ccSwitchDbPath();
+  const rows = sqliteJson(
+    db,
+    "SELECT listen_address, listen_port FROM proxy_config WHERE app_type='claude' LIMIT 1",
+  );
+  const host = rows[0]?.listen_address || "127.0.0.1";
+  const port = rows[0]?.listen_port || 15721;
+  return `http://${host}:${port}/claude-desktop`;
+}
+
+function claudeDesktopGatewayToken() {
+  const db = ccSwitchDbPath();
+  const rows = sqliteJson(db, "SELECT value FROM settings WHERE key='claude_desktop_gateway_token'");
+  return typeof rows[0]?.value === "string" ? rows[0].value : "";
 }
 
 export function currentClaudeDesktopId() {
@@ -142,6 +162,7 @@ export function readAppliedProfile() {
     baseUrl,
     host: hostOf(baseUrl),
     tokenTail: tokenTail(token),
+    token,
     provider: data.inferenceProvider ?? null,
     scheme: data.inferenceGatewayAuthScheme ?? null,
   };
@@ -220,8 +241,122 @@ export function applyClaudeDesktopProvider(provider) {
   const profile = providerProfile(provider);
   ensureMeta();
   ensureDeploymentMode();
-  writeAtomic(claudeDesktopProfilePath(), `${JSON.stringify(profile, null, 2)}\n`);
+  const filePath = claudeDesktopProfilePath();
+  let existing = {};
+  if (existsSync(filePath)) {
+    try {
+      existing = readJson(filePath);
+    } catch {
+      existing = {};
+    }
+  }
+  writeAtomic(filePath, `${JSON.stringify({ ...existing, ...profile }, null, 2)}\n`);
   return readAppliedProfile();
+}
+
+function followedStatePath() {
+  return dataFile("claude-desktop-followed.json");
+}
+
+function readFollowedState() {
+  const filePath = followedStatePath();
+  if (!existsSync(filePath)) return null;
+  try {
+    return readJson(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function writeFollowedState(provider) {
+  writeAtomic(followedStatePath(), `${JSON.stringify({ id: provider.id, tokenTail: provider.tokenTail, baseUrl: provider.baseUrl }, null, 2)}\n`);
+}
+
+function alignDatabaseCurrent(providerId) {
+  const db = ccSwitchDbPath();
+  const safe = providerId.replace(/'/g, "''");
+  sqliteExec(
+    db,
+    `UPDATE providers SET is_current = CASE WHEN id='${safe}' AND app_type='claude-desktop' THEN 1 ELSE 0 END WHERE app_type='claude-desktop';`,
+  );
+}
+
+function profileMatchesProvider(provider, profile) {
+  if (provider?.proxyMode) {
+    const token = claudeDesktopGatewayToken();
+    return profile?.baseUrl === claudeProxyEndpoint() && (!token || profile?.tokenTail === tokenTail(token));
+  }
+  return !!provider?.baseUrl && profile?.baseUrl === provider.baseUrl && profile?.tokenTail === provider.tokenTail;
+}
+
+function applyProxyProfile() {
+  const filePath = claudeDesktopProfilePath();
+  let existing = {};
+  if (existsSync(filePath)) {
+    try {
+      existing = readJson(filePath);
+    } catch {
+      existing = {};
+    }
+  }
+  const token = claudeDesktopGatewayToken();
+  const next = {
+    ...existing,
+    coworkEgressAllowedHosts: existing.coworkEgressAllowedHosts || ["*"],
+    disableDeploymentModeChooser: true,
+    inferenceProvider: "gateway",
+    inferenceGatewayAuthScheme: "bearer",
+    inferenceGatewayBaseUrl: claudeProxyEndpoint(),
+  };
+  if (token) next.inferenceGatewayApiKey = token;
+  ensureMeta();
+  writeAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`);
+  return readAppliedProfile();
+}
+
+/** 以 cc-switch 的 currentProviderClaudeDesktop 为准，把桌面网关写成同一供应商。 */
+export async function syncDesktopFromCcSwitch({ log = console.log } = {}) {
+  const id = currentClaudeDesktopId();
+  const providers = listClaudeDesktopProviders();
+  const provider = providers.find((item) => item.id === id) ?? null;
+  if (!provider) {
+    return { aligned: false, applied: false, reload: null, reason: "cc-switch 没有当前的 Claude Desktop 供应商" };
+  }
+  if (!provider.hasConfig) {
+    return {
+      aligned: false,
+      applied: false,
+      reload: null,
+      current: { id: provider.id, name: provider.name },
+      reason: `「${provider.name}」不是直连供应商，桌面网关保持原样`,
+    };
+  }
+  alignDatabaseCurrent(provider.id);
+  const before = readAppliedProfile();
+  const mismatch = !profileMatchesProvider(provider, before);
+  if (mismatch) {
+    if (provider.proxyMode) {
+      applyProxyProfile();
+      log(`  已按 cc-switch 代理写回本机网关 ${claudeProxyEndpoint()}`);
+    } else {
+      applyClaudeDesktopProvider(provider);
+      log(`  已按 cc-switch 写入 ${provider.name}（${provider.host}）`);
+    }
+  }
+  const followed = readFollowedState();
+  const selectionChanged = !!followed && (followed.id !== provider.id || followed.tokenTail !== provider.tokenTail);
+  let reload = null;
+  if (mismatch || selectionChanged) {
+    reload = await restartClaudeDesktop({ log });
+  }
+  writeFollowedState(provider);
+  return {
+    aligned: true,
+    applied: mismatch,
+    reload,
+    current: { id: provider.id, name: provider.name },
+    profile: readAppliedProfile(),
+  };
 }
 
 export function claudeDesktopSummary(provider) {
@@ -236,6 +371,7 @@ export function claudeDesktopSummary(provider) {
     baseUrl: provider.baseUrl,
     host: provider.host,
     tokenTail: provider.tokenTail,
+    token: provider.env?.ANTHROPIC_AUTH_TOKEN || null,
   };
 }
 
@@ -267,37 +403,46 @@ async function waitFor(predicate, timeoutMs) {
   return false;
 }
 
-/** 退出并重新打开 Claude.app，让它重新读取第三方网关配置。 */
+function activateClaude() {
+  execFileSync("osascript", ["-e", 'tell application "Claude" to activate'], { stdio: "ignore" });
+}
+
+/** 退出并重新打开 Claude.app，再把它的窗口激活到最前。 */
 export async function restartClaudeDesktop({ log = console.log } = {}) {
   const before = mainClaudePids();
-  if (!before.length) {
-    log("  当前没有运行中的 Claude Desktop，下次打开时生效。");
-    return { wasRunning: false, restarted: false, pid: null };
-  }
-  log(`  正在重新打开 Claude Desktop（pid ${before.join(", ")}）…`);
-  try {
-    execFileSync("osascript", ["-e", 'tell application "Claude" to quit'], { stdio: "ignore" });
-  } catch {
-    /* 下面再按 pid 结束 */
-  }
-  const gone = await waitFor(() => mainClaudePids().length === 0, 8000);
-  if (!gone) {
-    for (const pid of mainClaudePids()) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        /* 进程可能已经退出 */
-      }
+  if (before.length) {
+    log(`  正在重新打开 Claude Desktop（pid ${before.join(", ")}）…`);
+    try {
+      execFileSync("osascript", ["-e", 'tell application "Claude" to quit'], { stdio: "ignore" });
+    } catch {
+      /* 下面再按 pid 结束 */
     }
-    await waitFor(() => mainClaudePids().length === 0, 4000);
+    const gone = await waitFor(() => mainClaudePids().length === 0, 8000);
+    if (!gone) {
+      for (const pid of mainClaudePids()) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          /* 进程可能已经退出 */
+        }
+      }
+      await waitFor(() => mainClaudePids().length === 0, 4000);
+    }
+  } else {
+    log("  Claude Desktop 没在运行，正在打开并置于最前…");
   }
   execFileSync("open", ["-a", "Claude"], { stdio: "ignore" });
   let pid = null;
   await waitFor(() => {
-    pid = mainClaudePids().find((item) => !before.includes(item)) ?? null;
+    pid = mainClaudePids().find((item) => !before.includes(item)) ?? mainClaudePids()[0] ?? null;
     return pid != null;
   }, 12000);
-  if (!pid) throw new Error("Claude Desktop 已退出，但没有重新打开。");
-  log(`  Claude Desktop 已重新打开（pid ${pid}）。`);
-  return { wasRunning: true, restarted: true, pid };
+  if (!pid) throw new Error("Claude Desktop 没有打开。");
+  try {
+    activateClaude();
+  } catch {
+    /* open 已经把应用拉起，激活失败时窗口仍在 */
+  }
+  log(`  Claude Desktop 已在最前（pid ${pid}）。`);
+  return { wasRunning: before.length > 0, restarted: true, focused: true, pid };
 }

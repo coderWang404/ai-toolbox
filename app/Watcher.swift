@@ -4,7 +4,7 @@ import CryptoKit
 
 final class ConfigWatcher {
     private let configPath: String
-    private let queue = DispatchQueue(label: "codex-hotswitch.watcher")
+    private let queue = DispatchQueue(label: "ai-toolbox.watcher")
     private var timer: DispatchSourceTimer?
     private var lastHash: String?
     private var pendingWork: DispatchWorkItem?

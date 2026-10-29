@@ -1,10 +1,10 @@
 #!/bin/bash
-# 构建 "Codex 热切换.app"（原生菜单栏 App，内置 Node 版工具）
+# 构建 "AI 工具箱.app"（原生菜单栏 App，内置 Node 版工具）
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="Codex 热切换"
-EXEC_NAME="CodexHotSwitch"
+APP_NAME="AI 工具箱"
+EXEC_NAME="AIToolbox"
 DIST="$SRC_DIR/dist"
 APP="$DIST/$APP_NAME.app"
 
@@ -16,14 +16,22 @@ echo "==> 编译 Swift"
 swiftc -O -swift-version 5 \
   -o "$APP/Contents/MacOS/$EXEC_NAME" \
   "$SRC_DIR/app/"*.swift \
-  -framework AppKit -framework CryptoKit
+  -framework AppKit -framework CryptoKit -framework WebKit
 
 echo "==> 内置 Node 工具"
-mkdir -p "$APP/Contents/Resources/codex-hotswitch"
+mkdir -p "$APP/Contents/Resources/ai-toolbox"
 rsync -a \
-  --exclude 'node_modules' --exclude 'dist' --exclude '.DS_Store' \
-  "$SRC_DIR/bin" "$SRC_DIR/src" "$SRC_DIR/package.json" "$SRC_DIR/README.md" \
-  "$APP/Contents/Resources/codex-hotswitch/"
+  --exclude '/dist' --exclude '.DS_Store' \
+  "$SRC_DIR/bin" "$SRC_DIR/src" "$SRC_DIR/package.json" "$SRC_DIR/package-lock.json" "$SRC_DIR/node_modules" "$SRC_DIR/README.md" \
+  "$APP/Contents/Resources/ai-toolbox/"
+
+echo "==> 内置 HTML 渲染器"
+swiftc -O -swift-version 5 \
+  -o "$APP/Contents/Resources/ai-toolbox/render-html" \
+  "$SRC_DIR/tools/render-html.swift" \
+  -framework AppKit -framework WebKit
+mkdir -p "$SRC_DIR/dist"
+cp "$APP/Contents/Resources/ai-toolbox/render-html" "$SRC_DIR/dist/render-html"
 
 echo "==> Info.plist"
 cp "$SRC_DIR/app/Info.plist" "$APP/Contents/Info.plist"

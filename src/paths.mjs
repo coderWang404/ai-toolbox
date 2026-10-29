@@ -1,9 +1,36 @@
-// 路径解析：CODEX_HOME 与 cc-switch 数据目录。
+// 路径解析：CODEX_HOME、cc-switch 数据目录与本地数据目录。
+import { cpSync, existsSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const DATA_DIR_NAME = ".ai-toolbox";
+const LEGACY_DATA_DIR_NAME = ".codex-hotswitch";
+
+let cachedDataDir;
+
 export function home() {
   return process.env.CODEX_HOMESWITCH_HOME || os.homedir();
+}
+
+/** 本地数据目录（密钥、测速历史、远程机器等）。首次访问时从旧目录迁移。 */
+export function dataDir() {
+  if (cachedDataDir) return cachedDataDir;
+  const root = home();
+  const current = path.join(root, DATA_DIR_NAME);
+  const legacy = path.join(root, LEGACY_DATA_DIR_NAME);
+  if (!existsSync(current) && existsSync(legacy)) {
+    try {
+      renameSync(legacy, current);
+    } catch {
+      try { cpSync(legacy, current, { recursive: true }); } catch {}
+    }
+  }
+  cachedDataDir = current;
+  return current;
+}
+
+export function dataFile(name) {
+  return path.join(dataDir(), name);
 }
 
 /** cc-switch 管理的 Codex 配置目录（尊重 CODEX_HOME 环境变量）。 */

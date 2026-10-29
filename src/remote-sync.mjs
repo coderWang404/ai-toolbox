@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { keyOf, sectionPathOf } from "./common-config.mjs";
-import { ccSwitchCatalogPath, codexConfigPath } from "./paths.mjs";
+import { dataFile, ccSwitchCatalogPath, codexConfigPath } from "./paths.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,12 +28,12 @@ function hereDir() {
 }
 
 export function remotesFilePath() {
-  return process.env.CODEX_HOTSWITCH_REMOTES?.trim() || path.join(hereDir(), "remotes.json");
+  return process.env.AI_TOOLBOX_REMOTES?.trim() || path.join(hereDir(), "remotes.json");
 }
 
 /** 用户自己添加的机器，以及内置机器的开关。App 与命令行共用这个文件。 */
 export function userRemotesPath() {
-  return process.env.CODEX_HOTSWITCH_USER_REMOTES?.trim() || path.join(os.homedir(), ".codex-hotswitch", "remotes.json");
+  return process.env.AI_TOOLBOX_USER_REMOTES?.trim() || dataFile("remotes.json");
 }
 
 function readJson(file) {
@@ -163,6 +163,7 @@ export function providerSnapshot(text) {
     baseUrl,
     host,
     tokenTail: token.length >= 12 ? token.slice(-8) : null,
+    token: token || null,
   };
 }
 
@@ -271,6 +272,7 @@ function emptyHost(entry, error) {
     previousBaseUrl: null,
     providerName: null,
     tokenTail: null,
+    token: null,
     restarted: 0,
     error,
   };
@@ -415,6 +417,7 @@ async function pushHost(entry, content, catalog, dryRun) {
       previousBaseUrl: parsed.previousBaseUrl ?? null,
       providerName: snap.providerName,
       tokenTail: snap.tokenTail,
+      token: snap.token,
       restarted: parsed.restarted ?? 0,
       error: null,
     };
@@ -467,6 +470,7 @@ export async function syncRemotes({
           previousBaseUrl: applied.previousBaseUrl,
           providerName: snap.providerName,
           tokenTail: snap.tokenTail,
+          token: snap.token,
           restarted: 0,
           error: null,
         };
@@ -504,6 +508,7 @@ export async function inspectRemotes() {
           previousBaseUrl: null,
           providerName: snap.providerName,
           tokenTail: snap.tokenTail,
+          token: snap.token,
           restarted: 0,
           error: null,
         };

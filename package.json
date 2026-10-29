@@ -1,13 +1,16 @@
 {
-  "name": "codex-hotswitch",
+  "name": "ai-toolbox",
   "version": "1.0.0",
-  "description": "在不重启 Codex 的情况下切换 cc-switch 管理的第三方模型供应商",
+  "description": "本地 AI 工具箱：Codex 供应商热切换、cc-switch 同步、Claude Desktop 跟随与 Grok Bot 网关",
   "type": "module",
   "bin": {
-    "codex-hotswitch": "bin/codex-hotswitch.mjs"
+    "ai-toolbox": "bin/ai-toolbox.mjs"
   },
   "engines": {
     "node": ">=18"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.1"
+  }
 }

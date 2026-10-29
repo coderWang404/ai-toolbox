@@ -1,13 +1,14 @@
 // 主窗口：供应商列表 + 一键热切换 + 自动跟随。
 import AppKit
 import ServiceManagement
+import WebKit
 
-final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private var window: NSWindow!
     private var tableView: NSTableView!
     private var headerLabel: NSTextField!
     private var effectiveLabel: NSTextField!
-    private var statusLabel: NSTextField!
+    private var statusLabel: StatusLine!
     private var reloadButton: NSButton!
     private var watchSwitch: NSSwitch!
     private var scopePopup: NSPopUpButton!
@@ -17,19 +18,52 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     private var spinner: NSProgressIndicator!
     private var remoteRows: NSStackView!
     private var ccRows: NSStackView!
-    private var codexSidebar: SidebarRow!
-    private var claudeSidebar: SidebarRow!
-    private var ccSidebar: SidebarRow!
-    private var codexPane: NSStackView!
-    private var claudePane: NSStackView!
-    private var ccPane: NSStackView!
+    private var sidebar: SettingsSidebarController!
+    private var iqPane: NSView!
+    private var quotaPane: NSView!
+    private var quotaController: GoQuotaPane!
+    private var clinePane: NSView!
+    private var clineController: ClineQuotaPane!
+    private var grokPane: NSView!
+    private var grokController: GrokBotPane!
+    private var speedPane: NSView!
+    private var speedController: SpeedPane!
+    private let codexKeyHost = NSStackView()
+    private let claudeKeyHost = NSStackView()
+    private var iqProviderPopup: NSPopUpButton!
+    private var iqTopicPopup: NSPopUpButton!
+    private var iqModelPopup: NSPopUpButton!
+    private var iqThinkingControl: NSSegmentedControl!
+    private var iqThinkingLevels: [String] = ["off"]
+    private var iqStatusLabel: StatusLine!
+    private var iqWeb: QuietWebView!
+    private var iqPreviewHeight: NSLayoutConstraint?
+    private var iqFitWidth: CGFloat = 0
+    private var iqFitPasses = 0
+    private var iqReply: NSTextView!
+    private var iqReplyScroll: NSScrollView!
+    private var iqLogScroll: NSScrollView!
+    private var iqLogHeight: NSLayoutConstraint!
+    private var iqRunButton: NSButton!
+    private var iqCancelButton: NSButton!
+    private var iqPhase = "idle"
+    private var iqEmptyLabel: NSTextField!
+    private var iqMetaLabel: NSTextField!
+    private var iqLog: NSTextView!
+    private var codexNote: NSTextField!
+    private var claudeNote: NSTextField!
+    private var providerTableHeight: NSLayoutConstraint!
+    private var claudeTableHeight: NSLayoutConstraint!
+    private var codexPane: NSView!
+    private var claudePane: NSView!
+    private var ccPane: NSView!
     private var claudeTableView: NSTableView!
     private var claudeHeaderLabel: NSTextField!
     private var claudeEffectiveLabel: NSTextField!
-    private var claudeStatusLabel: NSTextField!
+    private var claudeStatusLabel: StatusLine!
     private var claudeWatchSwitch: NSSwitch!
     private var ccSyncSwitch: NSSwitch!
-    private var ccStatusLabel: NSTextField!
+    private var ccStatusLabel: StatusLine!
     private var addRemoteButton: NSButton!
     private let remotes = RemoteStore.shared
 
@@ -50,7 +84,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     private var ccSwitchBootstrapped = false
     private var ccSwitchLastAttempt = Date.distantPast
     private var ccSwitchRunning = false
+    private var iqProviders: [IqProvider] = []
+    private var iqCatalogTimer: Timer?
+    private var iqCatalogStamp: TimeInterval = 0
+    private var iqDidLoadResult = false
     private var busy = false
+    private var pendingAutoReload = false
+    private var pendingAutoReloadDone: (() -> Void)?
     private var onProvidersChanged: (([ProviderSummary], String?) -> Void)?
 
     private var defaults: UserDefaults { .standard }
@@ -72,58 +112,86 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
 
     private func buildWindow() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        window.title = "Codex"
-        window.subtitle = "供应商热切换"
-        window.titlebarSeparatorStyle = .automatic
-        window.minSize = NSSize(width: 700, height: 560)
+        window.title = AppIdentity.displayName
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 760, height: 520)
         window.isRestorable = false
         window.delegate = self
         window.center()
         window.isReleasedWhenClosed = false
+        let toolbar = NSToolbar(identifier: "ai-toolbox.main")
+        toolbar.delegate = self
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
 
-        guard let content = window.contentView else { return }
-
-        headerLabel = makeLabel("加载中…", font: .systemFont(ofSize: 20, weight: .semibold), color: .labelColor)
+        headerLabel = makeLabel("加载中…", font: .systemFont(ofSize: 15, weight: .semibold), color: .labelColor)
         effectiveLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         effectiveLabel.lineBreakMode = .byTruncatingMiddle
+        codexNote = makeLabel("", font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+        codexNote.lineBreakMode = .byWordWrapping
+        codexNote.maximumNumberOfLines = 3
+        statusLabel = StatusLine()
 
-        tableView = NSTableView()
-        tableView.headerView = nil
-        tableView.rowHeight = 48
-        tableView.selectionHighlightStyle = .none
-        tableView.backgroundColor = .clear
-        tableView.intercellSpacing = NSSize(width: 0, height: 0)
-        tableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main")))
-        tableView.dataSource = self
-        tableView.delegate = self
-        tableView.target = self
-        tableView.action = #selector(rowClicked)
-        tableView.style = .plain
-
-        let scroll = NSScrollView()
-        scroll.documentView = tableView
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.scrollerStyle = .overlay
-        scroll.automaticallyAdjustsContentInsets = false
-        scroll.contentInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 12)
+        tableView = makeProviderTable(action: #selector(rowClicked))
+        let providerScroll = makeTableScroll(tableView)
+        providerTableHeight = providerScroll.heightAnchor.constraint(equalToConstant: 176)
+        providerTableHeight.isActive = true
 
         reloadButton = NSButton(title: "重新加载", target: self, action: #selector(reloadNow))
         reloadButton.bezelStyle = .rounded
-        reloadButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "重新加载")
-        reloadButton.imagePosition = .imageLeading
         reloadButton.controlSize = .regular
-
-        watchSwitch = makeSwitch(action: #selector(toggleWatch))
         spinner = NSProgressIndicator()
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
+        let currentAccessory = NSStackView(views: [spinner, reloadButton])
+        currentAccessory.orientation = .horizontal
+        currentAccessory.alignment = .centerY
+        currentAccessory.spacing = 8
+        codexKeyHost.orientation = .vertical
+        codexKeyHost.alignment = .leading
+        codexKeyHost.spacing = 4
+        let currentTexts = NSStackView(views: [headerLabel, effectiveLabel, codexKeyHost])
+        currentTexts.orientation = .vertical
+        currentTexts.alignment = .leading
+        currentTexts.spacing = 2
+        codexKeyHost.widthAnchor.constraint(equalTo: currentTexts.widthAnchor).isActive = true
+        let currentRow = NSStackView(views: [currentTexts, flexibleSpace(), currentAccessory])
+        currentRow.orientation = .horizontal
+        currentRow.alignment = .centerY
+        let currentGroup = GroupBox()
+        currentGroup.addRow(currentRow)
+
+        watchSwitch = makeSwitch(action: #selector(toggleWatch))
+        watchSwitch.state = defaults.bool(forKey: "watchEnabled") ? .on : .off
+        remoteSwitch = makeSwitch(action: #selector(toggleRemote))
+        remoteSwitch.state = (defaults.object(forKey: "syncRemote") as? Bool ?? true) ? .on : .off
+        let followGroup = GroupBox()
+        followGroup.addRow(SettingRow(title: "自动跟随 cc-switch", subtitle: "cc-switch 里切换后自动热重启 Codex", accessory: watchSwitch))
+        followGroup.addRow(SettingRow(title: "远程同步", subtitle: "把本机供应商同步到已启用的机器", accessory: remoteSwitch))
+
+        remoteRows = NSStackView()
+        remoteRows.orientation = .vertical
+        remoteRows.alignment = .leading
+        remoteRows.spacing = 0
+        addRemoteButton = linkButton(title: "添加机器", symbol: "plus", action: #selector(addRemote))
+        rebuildRemoteRows()
+        let remoteGroup = GroupBox()
+        remoteRows.translatesAutoresizingMaskIntoConstraints = false
+        remoteGroup.addSubview(remoteRows)
+        NSLayoutConstraint.activate([
+            remoteRows.topAnchor.constraint(equalTo: remoteGroup.topAnchor),
+            remoteRows.leadingAnchor.constraint(equalTo: remoteGroup.leadingAnchor),
+            remoteRows.trailingAnchor.constraint(equalTo: remoteGroup.trailingAnchor),
+            remoteRows.bottomAnchor.constraint(equalTo: remoteGroup.bottomAnchor),
+            remoteRows.widthAnchor.constraint(equalTo: remoteGroup.widthAnchor),
+        ])
 
         scopePopup = NSPopUpButton()
         scopePopup.controlSize = .regular
@@ -131,238 +199,353 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         scopePopup.selectItem(at: scopeIndexFromDefaults())
         scopePopup.target = self
         scopePopup.action = #selector(scopeChanged)
-
+        scopePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
         focusSwitch = makeSwitch(action: #selector(toggleFocus))
         focusSwitch.state = (defaults.object(forKey: "focusChatGPT") as? Bool ?? true) ? .on : .off
-
-        remoteSwitch = makeSwitch(action: #selector(toggleRemote))
-        remoteSwitch.state = (defaults.object(forKey: "syncRemote") as? Bool ?? true) ? .on : .off
-
         loginSwitch = makeSwitch(action: #selector(toggleLogin))
         loginSwitch.state = Self.loginItemEnabled() ? .on : .off
+        let generalGroup = GroupBox()
+        generalGroup.addRow(SettingRow(title: "重启范围", accessory: scopePopup))
+        generalGroup.addRow(SettingRow(title: "热重启后聚焦 ChatGPT", accessory: focusSwitch))
+        generalGroup.addRow(SettingRow(title: "登录时启动", accessory: loginSwitch))
 
-        addRemoteButton = linkButton(title: "添加机器", symbol: "plus", action: #selector(addRemote))
-
-        remoteRows = NSStackView()
-        remoteRows.orientation = .vertical
-        remoteRows.alignment = .leading
-        remoteRows.spacing = 0
-        rebuildRemoteRows()
-        let remoteCard = card(containing: remoteRows, insets: NSEdgeInsets())
-
-        statusLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 3
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        codexSidebar = SidebarRow(title: "Codex", symbol: "arrow.left.arrow.right")
-        claudeSidebar = SidebarRow(title: "Claude Desktop", symbol: "bubble.left.and.bubble.right")
-        ccSidebar = SidebarRow(title: "cc-switch", symbol: "arrow.triangle.2.circlepath")
-        codexSidebar.onClick = { [weak self] in self?.selectPage(0) }
-        claudeSidebar.onClick = { [weak self] in self?.selectPage(2) }
-        ccSidebar.onClick = { [weak self] in self?.selectPage(1) }
-
-        let providerCard = card(containing: scroll, insets: NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4))
-        let actionRow = NSStackView(views: [reloadButton, spinner, flexibleSpace(), labeledSwitch(watchSwitch, title: "自动跟随")])
-        actionRow.orientation = .horizontal
-        actionRow.alignment = .centerY
-        actionRow.spacing = 8
-
-        let settings = groupedStack([
-            settingsLine("重启范围", scopePopup),
-            settingsLine("热重启后聚焦 ChatGPT", focusSwitch),
-            settingsLine("登录时启动", loginSwitch),
-        ])
-        let settingsCard = card(containing: settings, insets: NSEdgeInsets())
-
-        let hero = NSStackView(views: [
-            makeLabel("当前供应商", font: .systemFont(ofSize: 13, weight: .semibold), color: .secondaryLabelColor),
-            headerLabel,
-            effectiveLabel,
-        ])
-        hero.orientation = .vertical
-        hero.alignment = .leading
-        hero.spacing = 2
-
-        codexPane = NSStackView(views: [
-            hero,
-            sectionBlock("供应商", providerCard),
-            actionRow,
-            sectionBlock("远程机器", remoteCard),
-            sectionBlock("通用", settingsCard),
+        let codexBody = NSStackView(views: [
+            SectionView(title: "当前供应商", content: currentGroup, footer: nil),
+            SectionView(title: "供应商", content: providerScroll),
+            SectionView(title: "自动跟随", content: followGroup),
+            SectionView(title: "远程机器", content: remoteGroup),
+            SectionView(title: "通用", content: generalGroup),
             statusLabel,
         ])
-        codexPane.orientation = .vertical
-        codexPane.alignment = .leading
-        codexPane.spacing = 18
+        codexBody.orientation = .vertical
+        codexBody.alignment = .leading
+        codexBody.spacing = 22
+        codexNote.translatesAutoresizingMaskIntoConstraints = false
+        codexBody.insertArrangedSubview(codexNote, at: 1)
+        codexPane = codexBody
 
+        claudeHeaderLabel = makeLabel("加载中…", font: .systemFont(ofSize: 15, weight: .semibold), color: .labelColor)
+        claudeEffectiveLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+        claudeEffectiveLabel.lineBreakMode = .byTruncatingMiddle
+        claudeNote = makeLabel("", font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+        claudeNote.lineBreakMode = .byWordWrapping
+        claudeNote.maximumNumberOfLines = 3
+        claudeStatusLabel = StatusLine()
+        let claudeReload = NSButton(title: "重新打开", target: self, action: #selector(reloadClaudeNow))
+        claudeReload.bezelStyle = .rounded
+        claudeReload.bezelColor = .controlAccentColor
+        claudeKeyHost.orientation = .vertical
+        claudeKeyHost.alignment = .leading
+        claudeKeyHost.spacing = 4
+        let claudeCurrent = NSStackView(views: [
+            NSStackView(views: [claudeHeaderLabel, claudeEffectiveLabel, claudeKeyHost]),
+            flexibleSpace(),
+            claudeReload,
+        ])
+        claudeCurrent.orientation = .horizontal
+        claudeCurrent.alignment = .centerY
+        (claudeCurrent.arrangedSubviews[0] as? NSStackView)?.orientation = .vertical
+        if let texts = claudeCurrent.arrangedSubviews[0] as? NSStackView {
+            claudeKeyHost.widthAnchor.constraint(equalTo: texts.widthAnchor).isActive = true
+        }
+        (claudeCurrent.arrangedSubviews[0] as? NSStackView)?.alignment = .leading
+        let claudeCurrentGroup = GroupBox()
+        claudeCurrentGroup.addRow(claudeCurrent)
+        claudeTableView = makeProviderTable(action: #selector(claudeRowClicked))
+        let claudeScroll = makeTableScroll(claudeTableView)
+        claudeTableHeight = claudeScroll.heightAnchor.constraint(equalToConstant: 176)
+        claudeTableHeight.isActive = true
+        claudeWatchSwitch = makeSwitch(action: #selector(toggleClaudeWatch))
+        let claudeWatchOn = defaults.object(forKey: "watchClaudeEnabled") as? Bool ?? true
+        claudeWatchSwitch.state = claudeWatchOn ? .on : .off
+        let claudeFollow = GroupBox()
+        claudeFollow.addRow(SettingRow(title: "自动跟随 cc-switch", subtitle: "切换后退出并重新打开 Claude Desktop，并置于最前", accessory: claudeWatchSwitch))
+        let claudeBody = NSStackView(views: [
+            SectionView(title: "当前供应商", content: claudeCurrentGroup),
+            claudeNote,
+            SectionView(title: "供应商", content: claudeScroll),
+            SectionView(title: "自动跟随", content: claudeFollow),
+            claudeStatusLabel,
+        ])
+        claudeBody.orientation = .vertical
+        claudeBody.alignment = .leading
+        claudeBody.spacing = 22
+        claudePane = claudeBody
+
+        ccStatusLabel = StatusLine()
         ccSyncSwitch = makeSwitch(action: #selector(toggleCcSync))
         ccSyncSwitch.state = (defaults.object(forKey: "syncCcSwitch") as? Bool ?? true) ? .on : .off
+        let checkButton = NSButton(title: "立即检查", target: self, action: #selector(checkCcSwitchNow))
+        checkButton.bezelStyle = .rounded
+        checkButton.controlSize = .regular
         ccRows = NSStackView()
         ccRows.orientation = .vertical
         ccRows.alignment = .leading
         ccRows.spacing = 0
         rebuildCcRows()
-        ccStatusLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        ccStatusLabel.lineBreakMode = .byWordWrapping
-        ccStatusLabel.maximumNumberOfLines = 3
-        ccStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let ccCard = card(containing: ccRows, insets: NSEdgeInsets())
-        ccPane = NSStackView(views: [
-            sectionBlock("远程机器", ccCard),
+        let ccGroup = GroupBox()
+        ccRows.translatesAutoresizingMaskIntoConstraints = false
+        ccGroup.addSubview(ccRows)
+        NSLayoutConstraint.activate([
+            ccRows.topAnchor.constraint(equalTo: ccGroup.topAnchor),
+            ccRows.leadingAnchor.constraint(equalTo: ccGroup.leadingAnchor),
+            ccRows.trailingAnchor.constraint(equalTo: ccGroup.trailingAnchor),
+            ccRows.bottomAnchor.constraint(equalTo: ccGroup.bottomAnchor),
+            ccRows.widthAnchor.constraint(equalTo: ccGroup.widthAnchor),
+        ])
+        let syncRow = SettingRow(title: "实时同步", subtitle: "以本机配置为准，连上后先检查再更新", accessory: ccSyncSwitch)
+        let syncGroup = GroupBox()
+        syncGroup.addRow(NSStackView(views: [syncRow, flexibleSpace(), checkButton]))
+        let ccBody = NSStackView(views: [
+            SectionView(title: "同步", content: syncGroup),
+            SectionView(title: "远程机器", content: ccGroup),
             ccStatusLabel,
         ])
-        ccPane.orientation = .vertical
-        ccPane.alignment = .leading
-        ccPane.spacing = 10
+        ccBody.orientation = .vertical
+        ccBody.alignment = .leading
+        ccBody.spacing = 22
+        ccPane = ccBody
 
-        claudeTableView = NSTableView()
-        claudeTableView.headerView = nil
-        claudeTableView.rowHeight = 48
-        claudeTableView.selectionHighlightStyle = .none
-        claudeTableView.backgroundColor = .clear
-        claudeTableView.intercellSpacing = NSSize(width: 0, height: 0)
-        claudeTableView.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("claude")))
-        claudeTableView.dataSource = self
-        claudeTableView.delegate = self
-        claudeTableView.target = self
-        claudeTableView.action = #selector(claudeRowClicked)
-        claudeTableView.style = .plain
-        let claudeScroll = NSScrollView()
-        claudeScroll.documentView = claudeTableView
-        claudeScroll.hasVerticalScroller = true
-        claudeScroll.drawsBackground = false
-        claudeScroll.scrollerStyle = .overlay
-        let claudeCard = card(containing: claudeScroll, insets: NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4))
-        claudeHeaderLabel = makeLabel("加载中…", font: .systemFont(ofSize: 20, weight: .semibold), color: .labelColor)
-        claudeEffectiveLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        claudeEffectiveLabel.lineBreakMode = .byTruncatingMiddle
-        claudeStatusLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        claudeStatusLabel.lineBreakMode = .byWordWrapping
-        claudeStatusLabel.maximumNumberOfLines = 3
-        claudeWatchSwitch = makeSwitch(action: #selector(toggleClaudeWatch))
-        let claudeWatchOn = defaults.object(forKey: "watchClaudeEnabled") as? Bool ?? true
-        claudeWatchSwitch.state = claudeWatchOn ? .on : .off
-        let claudeReload = NSButton(title: "重新打开", target: self, action: #selector(reloadClaudeNow))
-        claudeReload.bezelStyle = .rounded
-        claudeReload.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "重新打开")
-        claudeReload.imagePosition = .imageLeading
-        let claudeActions = NSStackView(views: [claudeReload, flexibleSpace(), labeledSwitch(claudeWatchSwitch, title: "自动跟随")])
-        claudeActions.orientation = .horizontal
-        claudeActions.alignment = .centerY
-        let claudeHero = NSStackView(views: [
-            makeLabel("当前供应商", font: .systemFont(ofSize: 13, weight: .semibold), color: .secondaryLabelColor),
-            claudeHeaderLabel,
-            claudeEffectiveLabel,
-        ])
-        claudeHero.orientation = .vertical
-        claudeHero.alignment = .leading
-        claudeHero.spacing = 2
-        claudePane = NSStackView(views: [
-            claudeHero,
-            sectionBlock("供应商", claudeCard),
-            claudeActions,
-            claudeStatusLabel,
-        ])
-        claudePane.orientation = .vertical
-        claudePane.alignment = .leading
-        claudePane.spacing = 18
-
-        let stack = NSStackView(views: [codexPane, claudePane, ccPane])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 0
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 20, right: 20)
-        stack.setContentHuggingPriority(.required, for: .vertical)
-        stack.setContentCompressionResistancePriority(.required, for: .vertical)
-        stack.detachesHiddenViews = true
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let page = NSScrollView()
-        page.drawsBackground = true
-        page.backgroundColor = Chrome.page
-        page.scrollerStyle = .overlay
-        page.hasVerticalScroller = true
-        page.autohidesScrollers = true
-        page.documentView = stack
-        page.translatesAutoresizingMaskIntoConstraints = false
-        let sidebar = NSVisualEffectView()
-        sidebar.material = .sidebar
-        sidebar.blendingMode = .behindWindow
-        sidebar.state = .followsWindowActiveState
-        sidebar.translatesAutoresizingMaskIntoConstraints = false
-        let sidebarRows = NSStackView(views: [codexSidebar, claudeSidebar, ccSidebar])
-        sidebarRows.orientation = .vertical
-        sidebarRows.alignment = .leading
-        sidebarRows.spacing = 2
-        sidebarRows.edgeInsets = NSEdgeInsets(top: 12, left: 8, bottom: 12, right: 8)
-        sidebarRows.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(sidebarRows)
-        let divider = NSBox()
-        divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.setContentHuggingPriority(.defaultLow, for: .vertical)
-        divider.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        sidebar.setContentHuggingPriority(.defaultLow, for: .vertical)
-        page.setContentHuggingPriority(.defaultLow, for: .vertical)
-        content.addSubview(sidebar)
-        content.addSubview(divider)
-        content.addSubview(page)
-
-        let clip = page.contentView
+        iqTopicPopup = NSPopUpButton()
+        iqTopicPopup.addItem(withTitle: "鹈鹕骑自行车")
+        iqTopicPopup.lastItem?.representedObject = "pelican"
+        iqTopicPopup.addItem(withTitle: "秦始皇骑自行车买菜")
+        iqTopicPopup.lastItem?.representedObject = "qin"
+        iqTopicPopup.addItem(withTitle: "香蕉人开小汽车")
+        iqTopicPopup.lastItem?.representedObject = "banana"
+        iqTopicPopup.addItem(withTitle: "摸糖保证题")
+        iqTopicPopup.lastItem?.representedObject = "candy"
+        iqTopicPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        iqProviderPopup = NSPopUpButton()
+        iqModelPopup = NSPopUpButton()
+        iqProviderPopup.target = self
+        iqProviderPopup.action = #selector(iqProviderChanged)
+        iqModelPopup.target = self
+        iqModelPopup.action = #selector(iqModelChanged)
+        iqProviderPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        iqModelPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        iqThinkingControl = NSSegmentedControl(labels: ["关闭"], trackingMode: .selectOne, target: nil, action: nil)
+        iqThinkingControl.segmentStyle = .rounded
+        iqThinkingControl.selectedSegment = 0
+        iqThinkingControl.setContentHuggingPriority(.required, for: .horizontal)
+        iqStatusLabel = StatusLine()
+        iqRunButton = PageChrome.primaryButton("开始测试", action: #selector(runIqTest), target: self)
+        iqCancelButton = NSButton(title: "取消", target: self, action: #selector(cancelIqTest))
+        iqCancelButton.bezelStyle = .rounded
+        iqCancelButton.isHidden = true
+        iqMetaLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+        iqLog = NSTextView()
+        iqLog.isEditable = false
+        iqLog.isSelectable = true
+        iqLog.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        iqLog.textColor = .secondaryLabelColor
+        iqLog.drawsBackground = false
+        iqLog.string = ""
+        let logScroll = NSScrollView()
+        logScroll.documentView = iqLog
+        logScroll.hasVerticalScroller = true
+        logScroll.hasHorizontalScroller = false
+        logScroll.autohidesScrollers = true
+        logScroll.scrollerStyle = .overlay
+        logScroll.drawsBackground = false
+        logScroll.translatesAutoresizingMaskIntoConstraints = false
+        iqLogScroll = logScroll
+        iqLogHeight = logScroll.heightAnchor.constraint(equalToConstant: 0)
+        iqLogHeight.isActive = true
+        logScroll.isHidden = true
+        iqEmptyLabel = makeLabel("选择题目和模型后点「开始测试」", font: .systemFont(ofSize: 13), color: .secondaryLabelColor)
+        let previewWeb = QuietWebView()
+        previewWeb.navigationDelegate = previewWeb
+        previewWeb.onContentHeight = { [weak self] height in
+            guard let self, self.iqWeb?.isHidden == false else { return }
+            let width = self.iqWeb.bounds.width
+            if abs(width - self.iqFitWidth) > 1 {
+                self.iqFitWidth = width
+                self.iqFitPasses = 0
+            }
+            self.fitIqPreview(height)
+        }
+        iqWeb = previewWeb
+        iqWeb.translatesAutoresizingMaskIntoConstraints = false
+        let preview = NSView()
+        preview.wantsLayer = true
+        preview.layer?.cornerRadius = 10
+        preview.layer?.borderWidth = 0.5
+        preview.layer?.borderColor = NSColor.separatorColor.cgColor
+        preview.layer?.masksToBounds = true
+        iqReply = NSTextView()
+        iqReply.isEditable = false
+        iqReply.isSelectable = true
+        iqReply.font = .systemFont(ofSize: 13)
+        iqReply.textContainerInset = NSSize(width: 12, height: 12)
+        iqReply.drawsBackground = false
+        iqReply.isHorizontallyResizable = false
+        iqReply.textContainer?.widthTracksTextView = true
+        let replyScroll = NSScrollView()
+        replyScroll.documentView = iqReply
+        replyScroll.hasVerticalScroller = true
+        replyScroll.autohidesScrollers = true
+        replyScroll.scrollerStyle = .overlay
+        replyScroll.drawsBackground = false
+        replyScroll.isHidden = true
+        iqReplyScroll = replyScroll
+        preview.addSubview(iqWeb)
+        preview.addSubview(replyScroll)
+        preview.addSubview(iqEmptyLabel)
+        iqEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        replyScroll.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            sidebar.topAnchor.constraint(equalTo: content.topAnchor),
-            sidebar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: 212),
-            sidebarRows.topAnchor.constraint(equalTo: sidebar.topAnchor),
-            sidebarRows.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
-            sidebarRows.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            codexSidebar.widthAnchor.constraint(equalTo: sidebarRows.widthAnchor, constant: -16),
-            claudeSidebar.widthAnchor.constraint(equalTo: sidebarRows.widthAnchor, constant: -16),
-            ccSidebar.widthAnchor.constraint(equalTo: sidebarRows.widthAnchor, constant: -16),
-            codexSidebar.heightAnchor.constraint(equalToConstant: 48),
-            claudeSidebar.heightAnchor.constraint(equalToConstant: 48),
-            ccSidebar.heightAnchor.constraint(equalToConstant: 48),
-            divider.topAnchor.constraint(equalTo: content.topAnchor),
-            divider.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            divider.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            divider.widthAnchor.constraint(equalToConstant: 1),
-            page.topAnchor.constraint(equalTo: content.topAnchor),
-            page.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            page.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            page.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            stack.topAnchor.constraint(equalTo: clip.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            stack.widthAnchor.constraint(equalTo: clip.widthAnchor),
-            {
-                let bottom = stack.bottomAnchor.constraint(equalTo: clip.bottomAnchor)
-                bottom.priority = .defaultLow
-                return bottom
-            }(),
-            codexPane.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            claudePane.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            ccPane.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            claudeCard.widthAnchor.constraint(equalTo: claudePane.widthAnchor),
-            claudeActions.widthAnchor.constraint(equalTo: claudePane.widthAnchor),
-            claudeStatusLabel.widthAnchor.constraint(equalTo: claudePane.widthAnchor),
-            claudeScroll.heightAnchor.constraint(equalToConstant: 220),
-            providerCard.widthAnchor.constraint(equalTo: codexPane.widthAnchor),
-            remoteCard.widthAnchor.constraint(equalTo: codexPane.widthAnchor),
-            settingsCard.widthAnchor.constraint(equalTo: codexPane.widthAnchor),
-            actionRow.widthAnchor.constraint(equalTo: codexPane.widthAnchor),
-            statusLabel.widthAnchor.constraint(equalTo: codexPane.widthAnchor),
-            ccCard.widthAnchor.constraint(equalTo: ccPane.widthAnchor),
-            ccStatusLabel.widthAnchor.constraint(equalTo: ccPane.widthAnchor),
-            scroll.heightAnchor.constraint(equalToConstant: 220),
+            iqWeb.topAnchor.constraint(equalTo: preview.topAnchor),
+            iqWeb.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
+            iqWeb.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
+            iqWeb.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
+            replyScroll.topAnchor.constraint(equalTo: preview.topAnchor),
+            replyScroll.leadingAnchor.constraint(equalTo: preview.leadingAnchor),
+            replyScroll.trailingAnchor.constraint(equalTo: preview.trailingAnchor),
+            replyScroll.bottomAnchor.constraint(equalTo: preview.bottomAnchor),
+            iqEmptyLabel.centerXAnchor.constraint(equalTo: preview.centerXAnchor),
+            iqEmptyLabel.centerYAnchor.constraint(equalTo: preview.centerYAnchor),
         ])
+        let openBrowser = NSButton(title: "在浏览器打开", target: self, action: #selector(openIqInBrowser))
+        openBrowser.bezelStyle = .rounded
+        openBrowser.image = NSImage(systemSymbolName: "safari", accessibilityDescription: "在浏览器打开")
+        openBrowser.imagePosition = .imageLeading
+        let reveal = NSButton(title: "在访达中显示", target: self, action: #selector(revealIqInFinder))
+        reveal.bezelStyle = .rounded
+        reveal.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "在访达中显示")
+        reveal.imagePosition = .imageLeading
+        let iqActions = NSStackView(views: [flexibleSpace(), openBrowser, reveal])
+        iqActions.orientation = .horizontal
+        iqActions.spacing = 8
+        let iqTarget = GroupBox()
+        iqTarget.addRow(SettingRow(title: "题目", accessory: iqTopicPopup))
+        iqTarget.addRow(SettingRow(title: "供应商", accessory: iqProviderPopup))
+        iqTarget.addRow(SettingRow(title: "模型", accessory: iqModelPopup))
+        iqTarget.addRow(SettingRow(title: "思考强度", accessory: iqThinkingControl))
+        let iqTargetSection = SectionView(title: "测试对象", content: iqTarget, footer: "画面题只改工作目录里的 index.html。摸糖保证题只许文字作答，不能联网，也不能读文件。测试过程中可以暂停或取消。")
+        let runRow = NSStackView(views: [flexibleSpace(), iqCancelButton, iqRunButton])
+        runRow.orientation = .horizontal
+        let resultGroup = NSStackView(views: [iqMetaLabel, logScroll, preview, iqActions])
+        resultGroup.orientation = .vertical
+        resultGroup.alignment = .leading
+        resultGroup.spacing = 8
+        iqPreviewHeight = preview.heightAnchor.constraint(equalToConstant: 720)
+        iqPreviewHeight?.isActive = true
+        logScroll.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
+        preview.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
+        iqActions.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
+        let iqBody = NSStackView(views: [
+            iqTargetSection,
+            runRow,
+            SectionView(title: "结果", content: resultGroup),
+            iqStatusLabel,
+        ])
+        iqBody.orientation = .vertical
+        iqBody.alignment = .leading
+        iqBody.spacing = 22
+        iqPane = wrapPage("智商测试", "选定题目、供应商和模型，看它能不能画出指定的动画。", iqBody)
+        quotaController = GoQuotaPane(backend: backend)
+        quotaController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 4, text) }
+        quotaPane = quotaController.root
+        clineController = ClineQuotaPane(backend: backend)
+        clineController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 5, text) }
+        clinePane = clineController.root
+        grokController = GrokBotPane(backend: backend)
+        grokController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 6, text) }
+        grokPane = grokController.root
+        speedController = SpeedPane(backend: backend)
+        speedController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 7, text) }
+        speedPane = speedController.root
+
+        codexPane = wrapPage("Codex", "跟随 cc-switch 热切换 Codex 供应商", codexPane)
+        claudePane = wrapPage("Claude Desktop", "跟随 cc-switch 的 Claude Desktop 供应商，切换后重新打开应用", claudePane)
+        ccPane = wrapPage("cc-switch 同步", "以本机 cc-switch 为准，同步到远程机器", ccPane)
+
+        sidebar = SettingsSidebarController()
+        sidebar.onSelect = { [weak self] page in self?.selectPage(page) }
+        let content = NSViewController()
+        let host = NSView()
+        host.wantsLayer = true
+        for pane in [codexPane!, claudePane!, ccPane!, iqPane!, quotaPane!, clinePane!, grokPane!, speedPane!] {
+            pane.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(pane)
+        NSLayoutConstraint.activate([
+                pane.topAnchor.constraint(equalTo: host.topAnchor),
+                pane.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+                pane.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                pane.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            ])
+        }
+        content.view = host
+        let split = NSSplitViewController()
+        let sideItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        sideItem.minimumThickness = 200
+        sideItem.maximumThickness = 260
+        sideItem.canCollapse = false
+        let mainItem = NSSplitViewItem(viewController: content)
+        split.addSplitViewItem(sideItem)
+        split.addSplitViewItem(mainItem)
+        window.contentViewController = split
+        split.splitView.setPosition(220, ofDividerAt: 0)
 
         let savedPage = defaults.integer(forKey: "mainPage")
-        showPage(savedPage == 1 || savedPage == 2 ? savedPage : 0)
-        window.setContentSize(NSSize(width: 760, height: 720))
-        window.makeFirstResponder(tableView)
+        showPage([1, 2, 3, 4, 5, 6, 7].contains(savedPage) ? savedPage : 0)
         if ccSyncEnabled() { startCcSwitchFollow() }
+        startIqCatalogWatch()
+    }
+
+    private func startIqCatalogWatch() {
+        iqCatalogTimer?.invalidate()
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshIqCatalogIfChanged()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        iqCatalogTimer = timer
+    }
+
+    private func refreshIqCatalogIfChanged() {
+        let db = NSString(string: "~/.cc-switch/cc-switch.db").expandingTildeInPath
+        let settings = NSString(string: "~/.cc-switch/settings.json").expandingTildeInPath
+        let dbDate = (try? FileManager.default.attributesOfItem(atPath: db)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let settingsDate = (try? FileManager.default.attributesOfItem(atPath: settings)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let stamp = max(dbDate, settingsDate)
+        guard stamp != iqCatalogStamp else { return }
+        iqCatalogStamp = stamp
+        reloadIqProviders()
+    }
+
+    private func wrapPage(_ title: String, _ subtitle: String, _ body: NSView) -> NSView {
+        PageChrome.scroll(title: title, subtitle: subtitle, content: body)
+    }
+
+    private func makeProviderTable(action: Selector) -> NSTableView {
+        let table = NSTableView()
+        table.headerView = nil
+        table.rowHeight = 44
+        table.selectionHighlightStyle = .none
+        table.backgroundColor = .clear
+        table.intercellSpacing = NSSize(width: 0, height: 0)
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
+        column.resizingMask = .autoresizingMask
+        column.width = 480
+        table.addTableColumn(column)
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.action = action
+        table.style = .plain
+        return table
+    }
+
+    private func makeTableScroll(_ table: NSTableView) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.scrollerStyle = .overlay
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        return scroll
     }
 
     private func makeLabel(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
@@ -525,7 +708,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
             ccRows.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
-        addGrouped(ccRows, makeCcSyncRow())
         if remotes.machines.isEmpty {
             addGrouped(ccRows, makeLabel("还没有远程机器。可在 Codex 页添加。", font: .systemFont(ofSize: 13), color: .tertiaryLabelColor))
         } else {
@@ -536,7 +718,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
                 addGrouped(ccRows, row)
             }
         }
-        addGrouped(ccRows, hugLeading(linkButton(title: "立即检查", symbol: "arrow.clockwise", action: #selector(checkCcSwitchNow))))
     }
 
     private func makeCcSyncRow() -> NSView {
@@ -616,6 +797,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         texts.spacing = 1
 
         var trailing: [NSView] = []
+        if let token = remoteLive[machine.host]?.token, !token.isEmpty {
+            trailing.append(CopyableSecret(text: token))
+        }
         if machine.builtin {
             trailing.append(makeLabel("内置", font: .systemFont(ofSize: 11), color: .tertiaryLabelColor))
         } else {
@@ -646,13 +830,11 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        let view = ProviderRowView()
-        if tableView === claudeTableView {
-            view.active = claudeProviders[row].id == claudeCurrentId
-        } else {
-            view.active = providers[row].id == currentId
-        }
-        return view
+        nil
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        46
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -677,21 +859,24 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         textStack.spacing = 1
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        var leading: [NSView] = []
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        dot.layer?.backgroundColor = (isCurrent ? NSColor.systemGreen : NSColor.clear).cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.widthAnchor.constraint(equalToConstant: 8).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        leading.append(dot)
         var trailing: [NSView] = []
-        if provider.official {
-            let tag = NSTextField(labelWithString: "官方")
-            tag.font = .systemFont(ofSize: 11)
-            tag.textColor = .tertiaryLabelColor
-            trailing.append(tag)
+        if let token = provider.token, !token.isEmpty {
+            trailing.append(CopyableSecret(text: token))
         }
-        let mark = NSImageView()
-        mark.image = isCurrent ? NSImage(systemSymbolName: "checkmark", accessibilityDescription: "当前") : nil
-        mark.contentTintColor = .controlAccentColor
-        mark.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-        mark.translatesAutoresizingMaskIntoConstraints = false
-        trailing.append(mark)
+        if provider.official {
+            trailing.append(PageChrome.pill("官方"))
+        }
 
-        let rowStack = NSStackView(views: [textStack, flexibleSpace()] + trailing)
+        let rowStack = NSStackView(views: leading + [textStack, flexibleSpace()] + trailing)
         rowStack.orientation = .horizontal
         rowStack.alignment = .centerY
         rowStack.spacing = 8
@@ -705,7 +890,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
             rowStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             rowStack.topAnchor.constraint(equalTo: container.topAnchor),
             rowStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            mark.widthAnchor.constraint(equalToConstant: 14),
         ])
         if !provider.hasConfig || provider.official {
             container.alphaValue = 0.5
@@ -714,7 +898,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     }
 
     @objc private func rowClicked() {
-        let row = tableView.clickedRow
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
         guard row >= 0, row < providers.count, !busy else { return }
         let provider = providers[row]
         if provider.official {
@@ -767,6 +951,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
                     self.liveInfo = result.live
                     self.ccSwitchRunning = result.ccSwitchRunning ?? false
                     self.tableView.reloadData()
+                    self.providerTableHeight?.constant = self.tableHeight(self.tableView, rows: result.providers.count)
                     self.onProvidersChanged?(result.providers, result.currentId)
                     self.updateHeader(current: nil)
                 }
@@ -776,6 +961,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
                     self.updateHeader(current: current)
                     self.setBusy(false)
                     self.refreshRemoteLive()
+                    if let scroll = self.codexPane as? NSScrollView { self.scrollToTop(scroll) }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -806,13 +992,11 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         if let live, let host = live.host {
             lines.append("实际端点: \(host)")
         }
-        if let tail = live?.tokenTail {
-            lines.append("key …\(tail)")
-        }
         if let current, let eff = current.effective, eff.ok {
             lines.append(eff.hasToken == true ? "token ✔" : "token ✗")
         }
         effectiveLabel.stringValue = lines.joined(separator: "   ")
+        replaceSecrets(in: codexKeyHost, with: live?.token)
 
         // 一致性提示
         var notes: [String] = []
@@ -827,9 +1011,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
             let b = providers.first { $0.id == liveId }?.name ?? liveId
             notes.append("⚠️ cc-switch 记录的是「\(a)」，但实际配置来自「\(b)」")
         }
-        if !notes.isEmpty {
-            setStatus("ℹ️ " + notes.joined(separator: "；"))
-        }
+        codexNote?.stringValue = notes.joined(separator: "；")
+        codexNote?.isHidden = notes.isEmpty
         refreshSidebar()
     }
 
@@ -912,7 +1095,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
 
     /// 外部（cc-switch 或自身）改动配置后的自动热重启。
     func autoReloadAfterChange(onDone: (() -> Void)? = nil) {
-        guard !busy else { return }
+        if busy {
+            // 新建分组时 cc-switch 会连写两次配置。第一次重启还没结束时，
+            // 第二次变化不能丢掉，否则 app-server 会停在旧配置上。
+            pendingAutoReload = true
+            if onDone != nil { pendingAutoReloadDone = onDone }
+            return
+        }
         setBusy(true, status: "检测到配置变化，正在热重启 Codex…")
         let scope = scopeCode()
         let focus = focusSwitch.state == .on
@@ -921,7 +1110,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
             do {
                 let result = try self.backend.reload(scope: scope, focus: focus, remote: self.syncRemoteEnabled())
                 DispatchQueue.main.async {
-                    self.setBusy(false)
                     self.applyRemoteLive(result.remote)
                     self.refresh()
                     var text: String
@@ -934,13 +1122,12 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
                     }
                     if let remote = self.remoteSummary(result.remote) { text += " · \(remote)" }
                     self.setStatus(text)
-                    onDone?()
+                    self.finishAutoReload(onDone: onDone)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.setBusy(false)
                     self.setStatus("❌ 自动跟随失败: \(error.localizedDescription)")
-                    onDone?()
+                    self.finishAutoReload(onDone: onDone)
                 }
             }
         }
@@ -966,7 +1153,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     var claudeWatchIsOn: Bool { claudeWatchSwitch?.state == .on }
 
     @objc private func claudeRowClicked() {
-        let row = claudeTableView.clickedRow
+        let row = claudeTableView.clickedRow >= 0 ? claudeTableView.clickedRow : claudeTableView.selectedRow
         guard row >= 0, row < claudeProviders.count, !busy else { return }
         let provider = claudeProviders[row]
         if !provider.hasConfig {
@@ -1011,7 +1198,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
                     self.refreshClaude()
                     let restarted = result.reload?.restarted == true
                     self.setClaudeStatus(restarted
-                        ? "✔ 已切换到 \(provider.name)，Claude Desktop 已重新打开"
+                        ? "✔ 已切换到 \(provider.name)，Claude Desktop 已重新打开并置于最前"
                         : "✔ 已写入 \(provider.name)，下次打开 Claude Desktop 时生效")
                 }
             } catch {
@@ -1034,6 +1221,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
                     self.claudeLive = result.live
                     self.ccSwitchRunning = result.ccSwitchRunning ?? self.ccSwitchRunning
                     self.claudeTableView?.reloadData()
+                    self.claudeTableHeight?.constant = self.tableHeight(self.claudeTableView, rows: result.providers.count)
                     self.updateClaudeHeader()
                     self.refreshSidebar()
                 }
@@ -1044,8 +1232,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     }
 
     private func updateClaudeHeader() {
-        let liveId = claudeLive?.liveProviderId
-        let provider = claudeProviders.first { $0.id == liveId } ?? claudeProviders.first { $0.id == claudeCurrentId }
+        let provider = claudeProviders.first { $0.id == claudeCurrentId }
         if let provider {
             claudeHeaderLabel?.stringValue = provider.host.map { "\(provider.name) · \($0)" } ?? provider.name
         } else {
@@ -1053,8 +1240,16 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         }
         var lines: [String] = []
         if let host = claudeLive?.host { lines.append("实际网关: \(host)") }
-        if let tail = claudeLive?.tokenTail { lines.append("key …\(tail)") }
         claudeEffectiveLabel?.stringValue = lines.joined(separator: "   ")
+        replaceSecrets(in: claudeKeyHost, with: claudeLive?.token)
+        if let provider, let liveId = claudeLive?.liveProviderId, liveId != provider.id {
+            let liveName = claudeProviders.first { $0.id == liveId }?.name ?? "另一套网关"
+            claudeNote?.stringValue = "cc-switch 当前是「\(provider.name)」，桌面仍是「\(liveName)」。自动跟随会按 cc-switch 写回。"
+            claudeNote?.isHidden = false
+        } else {
+            claudeNote?.stringValue = ""
+            claudeNote?.isHidden = true
+        }
     }
 
     @objc private func reloadClaudeNow() {
@@ -1084,17 +1279,25 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     func autoReloadClaude(onDone: (() -> Void)? = nil) {
         guard !busy else { onDone?(); return }
         setBusy(true, status: nil)
-        setClaudeStatus("检测到 cc-switch 切换，正在重新打开 Claude Desktop…")
+        setClaudeStatus("正在按 cc-switch 的当前供应商同步 Claude Desktop…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let result = try self.backend.claudeReload()
+                let result = try self.backend.claudeSync()
+                NotificationCenter.default.post(name: .claudeConfigWrittenFromApp, object: nil)
                 DispatchQueue.main.async {
                     self.setBusy(false)
                     self.refreshClaude()
-                    self.setClaudeStatus(result.reload?.restarted == true
-                        ? "⚡ 已跟随 cc-switch，Claude Desktop 已重新打开"
-                        : "⚡ 网关配置已更新，下次打开 Claude Desktop 时生效")
+                    let name = result.current?.name ?? "当前供应商"
+                    if let reason = result.reason, result.aligned != true {
+                        self.setClaudeStatus(reason)
+                    } else if result.reload?.restarted == true {
+                        self.setClaudeStatus("⚡ 已按 cc-switch 的「\(name)」重新打开 Claude Desktop，并置于最前")
+                    } else if result.applied == true {
+                        self.setClaudeStatus("⚡ 已按 cc-switch 的「\(name)」写回网关，下次打开 Claude Desktop 时生效")
+                    } else {
+                        self.setClaudeStatus("已与 cc-switch 的「\(name)」一致")
+                    }
                     onDone?()
                 }
             } catch {
@@ -1115,7 +1318,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     }
 
     private func setClaudeStatus(_ text: String) {
-        claudeStatusLabel?.stringValue = text
+        claudeStatusLabel?.set(text)
     }
 
     @objc private func scopeChanged() {
@@ -1133,27 +1336,419 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         setStatus(remoteSwitch.state == .on ? "已开启 Codex 远程同步" : "已关闭 Codex 远程同步")
     }
 
+    func refreshIq() {
+        reloadIqProviders()
+        if !iqDidLoadResult {
+            iqDidLoadResult = true
+            loadLastIqResult()
+        }
+    }
+
+    private func reloadIqProviders() {
+        let selected = currentIqSelection()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.backend.iqList()
+                DispatchQueue.main.async {
+                    self.applyIqProviders(result.providers, keeping: selected)
+                }
+            } catch {
+                DispatchQueue.main.async { self.iqStatusLabel?.set("❌ \(error.localizedDescription)") }
+            }
+        }
+    }
+
+    private func currentIqSelection() -> (key: String, model: String, thinking: String)? {
+        guard let provider = selectedIqProvider() else { return nil }
+        return ("\(provider.appType)/\(provider.id)", iqModelPopup?.titleOfSelectedItem ?? "", selectedIqThinking())
+    }
+
+    private func selectedIqProvider() -> IqProvider? {
+        let key = iqProviderPopup?.selectedItem?.representedObject as? String
+        return iqProviders.first { "\($0.appType)/\($0.id)" == key }
+    }
+
+    private func selectedIqModel() -> IqModel? {
+        guard let provider = selectedIqProvider() else { return nil }
+        let name = iqModelPopup.titleOfSelectedItem ?? ""
+        return provider.models.first { $0.id == name } ?? provider.models.first
+    }
+
+    private func selectedIqThinking() -> String {
+        let index = iqThinkingControl?.selectedSegment ?? 0
+        guard index >= 0, index < iqThinkingLevels.count else { return "off" }
+        return iqThinkingLevels[index]
+    }
+
+    private func applyIqProviders(_ providers: [IqProvider], keeping selected: (key: String, model: String, thinking: String)?) {
+        iqProviders = providers
+        let menu = NSMenu()
+        let order = ["claude", "codex", "opencode"]
+        let grouped = Dictionary(grouping: providers, by: \.appType)
+        let types = order.filter { grouped[$0] != nil } + grouped.keys.filter { !order.contains($0) }.sorted()
+        for type in types {
+            let header = NSMenuItem()
+            header.isEnabled = false
+            header.attributedTitle = NSAttributedString(
+                string: iqAppTypeTitle(type),
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ]
+            )
+            menu.addItem(header)
+            for provider in grouped[type] ?? [] {
+                let item = NSMenuItem(title: provider.name, action: nil, keyEquivalent: "")
+                item.representedObject = "\(provider.appType)/\(provider.id)"
+                menu.addItem(item)
+            }
+            if type != types.last { menu.addItem(.separator()) }
+        }
+        iqProviderPopup.menu = menu
+        let fallback = providers.first { $0.appType == "claude" && $0.id == "stepfun" }
+            ?? providers.first
+        let key = selected?.key ?? fallback.map { "\($0.appType)/\($0.id)" }
+        if let key, let item = menu.items.first(where: { ($0.representedObject as? String) == key }) {
+            iqProviderPopup.select(item)
+        }
+        fillIqModels(preferred: selected?.model, thinking: selected?.thinking)
+    }
+
+    private func iqAppTypeTitle(_ type: String) -> String {
+        switch type {
+        case "claude": return "Claude"
+        case "claude-desktop": return "Claude Desktop"
+        case "codex": return "Codex"
+        case "opencode": return "OpenCode"
+        default: return type
+        }
+    }
+
+    private func thinkingTitle(_ level: String) -> String {
+        switch level {
+        case "off": return "关闭"
+        case "minimal": return "极轻"
+        case "low": return "轻"
+        case "medium": return "中"
+        case "high": return "高"
+        case "xhigh": return "极高"
+        default: return level
+        }
+    }
+
+    private func fillIqModels(preferred: String? = nil, thinking: String? = nil) {
+        guard let provider = selectedIqProvider() else { return }
+        let models = provider.models
+        let keep = preferred ?? iqModelPopup.titleOfSelectedItem
+        iqModelPopup.removeAllItems()
+        iqModelPopup.addItems(withTitles: models.map(\.id))
+        if let keep, let found = models.firstIndex(where: { $0.id == keep }) {
+            iqModelPopup.selectItem(at: found)
+        } else if let preview = models.firstIndex(where: { $0.id == "step-5-preview" }) {
+            iqModelPopup.selectItem(at: preview)
+        }
+        fillIqThinking(preferred: thinking)
+    }
+
+    private func fillIqThinking(preferred: String? = nil) {
+        let model = selectedIqModel()
+        let levels = model?.thinkingLevels ?? ["off"]
+        iqThinkingLevels = levels.isEmpty ? ["off"] : levels
+        iqThinkingControl.segmentCount = iqThinkingLevels.count
+        for (index, level) in iqThinkingLevels.enumerated() {
+            iqThinkingControl.setLabel(thinkingTitle(level), forSegment: index)
+            iqThinkingControl.setWidth(46, forSegment: index)
+        }
+        let choice = preferred ?? model?.defaultThinking ?? "off"
+        iqThinkingControl.selectedSegment = iqThinkingLevels.firstIndex(of: choice) ?? 0
+        iqThinkingControl.isEnabled = iqThinkingLevels.count > 1
+    }
+
+    @objc private func iqModelChanged() {
+        fillIqThinking(preferred: nil)
+    }
+
+    @objc private func iqProviderChanged() {
+        fillIqModels(preferred: nil)
+    }
+
+    @objc private func runIqTest() {
+        if iqPhase == "running" {
+            backend.iqControl("pause")
+            return
+        }
+        if iqPhase == "paused" {
+            backend.iqControl("resume")
+            iqPhase = "running"
+            iqRunButton?.title = "暂停"
+            iqStatusLabel.set("继续测试…")
+            return
+        }
+        guard let provider = selectedIqProvider(), !busy else { return }
+        let model = iqModelPopup.titleOfSelectedItem ?? provider.models.first?.id ?? ""
+        let thinking = selectedIqThinking()
+        let topic = iqTopicPopup.selectedItem?.representedObject as? String ?? "pelican"
+        let topicTitle = iqTopicPopup.titleOfSelectedItem ?? "鹈鹕骑自行车"
+        guard !model.isEmpty else { return }
+        setBusy(true, status: nil)
+        iqPhase = "running"
+        iqStatusLabel.set("正在测试 \(topicTitle) · \(provider.name) / \(model) · \(thinkingTitle(thinking))…")
+        iqLog?.string = ""
+        iqReply?.string = ""
+        iqReplyScroll?.isHidden = true
+        iqWeb?.isHidden = false
+        setIqLogVisible(false)
+        appendIqLine("开始 \(provider.name) / \(model)")
+        iqRunButton?.title = "暂停"
+        iqRunButton?.isEnabled = true
+        iqCancelButton?.isHidden = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.backend.iqRun("\(provider.appType)/\(provider.id)", model: model, thinking: thinking, topic: topic) { [weak self] chunk in
+                    self?.handleIqProgress(chunk)
+                }
+                DispatchQueue.main.async {
+                    self.finishIqRun()
+                    self.showIq(result)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.finishIqRun()
+                    self.iqStatusLabel.set("❌ \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func handleIqProgress(_ chunk: String) {
+        for raw in chunk.split(whereSeparator: \.isNewline) {
+            let line = String(raw).trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("STATE ") {
+                applyIqState(String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces))
+            } else if line.hasPrefix("HTML ") {
+                let path = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                appendIqLine("页面已更新")
+                iqEmptyLabel?.isHidden = true
+                let url = URL(fileURLWithPath: path)
+                iqWeb?.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            } else if line.hasPrefix("STEP ") {
+                let text = String(line.dropFirst(5))
+                appendIqLine(text)
+                iqStatusLabel?.set(text)
+            } else if line.hasPrefix("RUN_DIR ") {
+                appendIqLine("工作目录已准备")
+            }
+        }
+    }
+
+    private func appendIqLine(_ text: String) {
+        guard let iqLog else { return }
+        if !iqLog.string.isEmpty { iqLog.string += "\n" }
+        iqLog.string += text
+        iqLog.scrollToEndOfDocument(nil)
+        setIqLogVisible(true)
+    }
+
+    private func setIqLogVisible(_ visible: Bool) {
+        iqLogScroll?.isHidden = !visible
+        iqLogHeight?.constant = visible ? 72 : 0
+    }
+
+    @objc private func cancelIqTest() {
+        guard iqPhase == "running" || iqPhase == "paused" else { return }
+        iqPhase = "cancelled"
+        iqStatusLabel.set("正在取消…")
+        iqRunButton?.isEnabled = false
+        backend.iqControl("cancel")
+    }
+
+    private func applyIqState(_ state: String) {
+        guard state == "running" || state == "paused" || state == "cancelled" else { return }
+        iqPhase = state
+        iqCancelButton?.isHidden = false
+        if state == "paused" {
+            iqRunButton?.title = "继续"
+            iqRunButton?.isEnabled = true
+            iqStatusLabel.set("已暂停")
+        } else if state == "running" {
+            iqRunButton?.title = "暂停"
+            iqRunButton?.isEnabled = true
+        }
+    }
+
+    private func finishIqRun() {
+        iqPhase = "idle"
+        setBusy(false)
+        iqRunButton?.title = "开始测试"
+        iqRunButton?.isEnabled = true
+        iqCancelButton?.isHidden = true
+    }
+
+    private func showIq(_ result: IqRunResult) {
+        if result.stopReason == "cancelled", result.htmlPath == nil, (result.reply ?? "").isEmpty {
+            iqStatusLabel.set("已取消")
+            iqRunButton?.title = "开始测试"
+            iqRunButton?.isEnabled = true
+            return
+        }
+        let inspect = result.inspect
+        let textAnswer = (result.reply?.isEmpty == false)
+        let flag: String
+        if textAnswer {
+            flag = result.answer.map { "答案 \($0)" } ?? "没有单独写出答案"
+        } else {
+            flag = (inspect?.hasSvg == true && inspect?.hasAnimation == true) ? "SVG 和动画都有" : "检查未完全通过"
+        }
+        let thinking = result.thinking.flatMap { $0 == "off" ? nil : thinkingTitle($0) }
+        let head = "\(result.topicTitle ?? iqTopicPopup.titleOfSelectedItem ?? "") · \(result.providerName ?? "") / \(result.model ?? "")"
+        iqMetaLabel?.stringValue = thinking == nil ? "\(head) · \(flag)" : "\(head) · \(thinking!) · \(flag)"
+        if result.stopReason == "cancelled" {
+            iqStatusLabel.set("已取消，保留已写出的页面")
+        } else {
+            iqStatusLabel.set("")
+        }
+        iqRunButton?.title = "开始测试"
+        iqRunButton?.isEnabled = true
+        if textAnswer, let reply = result.reply {
+            iqEmptyLabel?.isHidden = true
+            iqWeb?.isHidden = true
+            iqReplyScroll?.isHidden = false
+            iqReply?.string = reply
+            fitIqReply()
+            return
+        }
+        iqReplyScroll?.isHidden = true
+        iqWeb?.isHidden = false
+        iqWeb?.forwardsWheelToParent = true
+        iqReply?.string = ""
+        guard let html = result.htmlPath else {
+            iqEmptyLabel?.isHidden = false
+            iqPreviewHeight?.constant = 360
+            return
+        }
+        iqEmptyLabel?.isHidden = true
+        iqFitPasses = 0
+        iqPreviewHeight?.constant = 720
+        let url = URL(fileURLWithPath: html)
+        iqWeb.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        sidebar?.setDetail(page: 3, result.model ?? "鹈鹕骑车")
+    }
+
+    private func fitIqPreview(_ measured: CGFloat) {
+        let cap: CGFloat = 12000
+        let target = min(max(ceil(measured), 360), cap)
+        guard let constraint = iqPreviewHeight else { return }
+        let delta = target - constraint.constant
+        if abs(delta) < 8 { return }
+        if delta > 0 {
+            iqFitPasses += 1
+            if iqFitPasses > 6 { return }
+        }
+        constraint.constant = target
+        iqWeb?.forwardsWheelToParent = measured <= cap
+    }
+
+    private func fitIqReply() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let reply = self.iqReply, let container = reply.textContainer, let manager = reply.layoutManager, self.iqWeb?.isHidden == true else { return }
+            let width = max((self.iqReplyScroll?.bounds.width ?? 0) - 8, 280)
+            container.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            manager.ensureLayout(for: container)
+            let used = manager.usedRect(for: container).height
+            self.iqFitPasses = 0
+            self.fitIqPreview(used + 36)
+        }
+    }
+
+    @objc private func openIqInBrowser() {
+        guard let html = lastIqHTML() else { return }
+        NSWorkspace.shared.open(html)
+    }
+
+    @objc private func revealIqInFinder() {
+        guard let html = lastIqHTML() else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([html])
+    }
+
+    private func lastIqHTML() -> URL? {
+        let path = AppPaths.dataFile("iq-last.json").path
+        guard let data = FileManager.default.contents(atPath: path),
+              let result = try? JSONDecoder().decode(IqRunResult.self, from: data),
+              let html = result.htmlPath else { return nil }
+        return URL(fileURLWithPath: html)
+    }
+
+    private func loadLastIqResult() {
+        let path = AppPaths.dataFile("iq-last.json").path
+        guard let data = FileManager.default.contents(atPath: path),
+              let result = try? JSONDecoder().decode(IqRunResult.self, from: data) else { return }
+        showIq(result)
+    }
+
     func selectPage(_ index: Int) {
-        let page = index == 1 || index == 2 ? index : 0
+        let page = [0, 1, 2, 3, 4, 5, 6, 7].contains(index) ? index : 0
         defaults.set(page, forKey: "mainPage")
         showPage(page)
     }
 
     private func showPage(_ index: Int) {
-        codexPane?.isHidden = index != 0
-        claudePane?.isHidden = index != 2
-        ccPane?.isHidden = index != 1
-        window?.subtitle = index == 1 ? "cc-switch 同步" : (index == 2 ? "Claude Desktop" : "供应商热切换")
-        codexSidebar?.selected = index == 0
-        claudeSidebar?.selected = index == 2
-        ccSidebar?.selected = index == 1
+        let pages = [codexPane, claudePane, ccPane, iqPane, quotaPane, clinePane, grokPane, speedPane]
+        let visible = pane(for: index)
+        for pane in pages {
+            pane?.isHidden = pane !== visible
+        }
+        sidebar?.select(page: index)
+        if let scroll = visible as? NSScrollView {
+            scrollToTop(scroll)
+            DispatchQueue.main.async { [weak self] in self?.scrollToTop(scroll) }
+        }
+        if index == 3 { refreshIq() }
+        if index == 4 { quotaController?.onShow() }
+        if index == 5 { clineController?.onShow() }
+        if index == 6 { grokController?.onShow() }
+        if index == 7 { speedController?.onShow() } else { speedController?.onHide() }
         refreshSidebar()
     }
 
+    private func pane(for index: Int) -> NSView? {
+        switch index {
+        case 1: return ccPane
+        case 2: return claudePane
+        case 3: return iqPane
+        case 4: return quotaPane
+        case 5: return clinePane
+        case 6: return grokPane
+        case 7: return speedPane
+        default: return codexPane
+        }
+    }
+
+    private func scrollToTop(_ scroll: NSScrollView) {
+        guard scroll.documentView != nil else { return }
+        let clip = scroll.contentView
+        guard let document = scroll.documentView else { return }
+        let y = clip.isFlipped ? 0 : max(0, document.bounds.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        scroll.reflectScrolledClipView(clip)
+    }
+
     private func refreshSidebar() {
-        codexSidebar?.setDetail(codexSidebarDetail())
-        claudeSidebar?.setDetail(claudeSidebarDetail())
-        ccSidebar?.setDetail(ccSidebarDetail())
+        sidebar?.setDetail(page: 0, codexSidebarDetail())
+        sidebar?.setDetail(page: 2, claudeSidebarDetail())
+        sidebar?.setDetail(page: 1, ccSidebarDetail())
+        sidebar?.setDetail(page: 3, iqSidebarDetail())
+        sidebar?.setDetail(page: 4, quotaController?.sidebarDetail() ?? "查询剩余额度")
+        sidebar?.setDetail(page: 5, clineController?.sidebarDetail() ?? "查询剩余额度")
+        sidebar?.setDetail(page: 6, grokController?.sidebarDetail() ?? "本机网关")
+        sidebar?.setDetail(page: 7, speedController?.sidebarDetail() ?? "未测速")
+    }
+
+    private func iqSidebarDetail() -> String {
+        if let model = iqModelPopup?.titleOfSelectedItem, !model.isEmpty { return model }
+        return "鹈鹕骑车"
     }
 
     private func claudeSidebarDetail() -> String {
@@ -1256,7 +1851,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
     }
 
     private func setCcStatus(_ text: String) {
-        ccStatusLabel?.stringValue = text
+        ccStatusLabel?.set(text)
     }
 
     private func syncRemoteEnabled() -> Bool {
@@ -1384,13 +1979,32 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
         }
     }
 
+    private func replaceSecrets(in host: NSStackView, with token: String?) {
+        for view in host.arrangedSubviews {
+            host.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        guard let token, !token.isEmpty else { return }
+        let secret = CopyableSecret(text: token, expands: true)
+        host.addArrangedSubview(secret)
+        secret.widthAnchor.constraint(equalTo: host.widthAnchor).isActive = true
+    }
+
+    private func tableHeight(_ table: NSTableView?, rows: Int) -> CGFloat {
+        guard let table, rows > 0 else { return 44 }
+        var total: CGFloat = 0
+        for row in 0..<rows {
+            total += self.tableView(table, heightOfRow: row)
+        }
+        return min(560, max(44, total))
+    }
+
     private func usageText(for host: String) -> String {
         guard let live = remoteLive[host] else { return "正在读取…" }
         if !live.ok { return live.error ?? "读取失败" }
         let name = live.providerName ?? "未命名"
         let endpoint = live.baseUrl.flatMap { URL(string: $0)?.host } ?? live.baseUrl ?? "—"
-        let key = live.tokenTail.map { "key …\($0)" } ?? "key —"
-        return "\(name) · \(endpoint) · \(key)"
+        return "\(name) · \(endpoint)"
     }
 
     private func refreshRemoteLive() {
@@ -1472,13 +2086,34 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSTableViewDataSou
 
     // MARK: - 状态
 
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [] }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [] }
+
     func setStatus(_ text: String) {
-        statusLabel.stringValue = text
+        statusLabel.set(text)
+    }
+
+    private func finishAutoReload(onDone: (() -> Void)?) {
+        if pendingAutoReload {
+            pendingAutoReloadDone = onDone ?? pendingAutoReloadDone
+        }
+        let followUp = pendingAutoReload
+        setBusy(false)
+        if followUp {
+            let done = pendingAutoReloadDone
+            pendingAutoReload = false
+            pendingAutoReloadDone = nil
+            autoReloadAfterChange(onDone: done)
+        } else {
+            onDone?()
+        }
     }
 
     private func setBusy(_ value: Bool, status: String? = nil) {
         busy = value
         reloadButton.isEnabled = !value
+        iqRunButton?.isEnabled = !value
         tableView.isEnabled = !value
         claudeTableView?.isEnabled = !value
         if value { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
@@ -1720,7 +2355,7 @@ final class CardView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = Chrome.card.cgColor
+        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
     }
 }
 
@@ -1739,23 +2374,9 @@ final class ProviderRowView: NSTableRowView {
     }
 }
 
-enum Chrome {
-    static let page = NSColor(name: "codex.pageBackground") { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.110, green: 0.110, blue: 0.118, alpha: 1)
-            : NSColor(srgbRed: 0.949, green: 0.949, blue: 0.961, alpha: 1)
-    }
-
-    static let card = NSColor(name: "codex.cardBackground") { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.173, green: 0.173, blue: 0.180, alpha: 1)
-            : .white
-    }
-}
-
 extension Notification.Name {
-    static let watchToggled = Notification.Name("codex-hotswitch.watchToggled")
-    static let configWrittenFromApp = Notification.Name("codex-hotswitch.configWrittenFromApp")
-    static let claudeWatchToggled = Notification.Name("codex-hotswitch.claudeWatchToggled")
-    static let claudeConfigWrittenFromApp = Notification.Name("codex-hotswitch.claudeConfigWrittenFromApp")
+    static let watchToggled = Notification.Name("ai-toolbox.watchToggled")
+    static let configWrittenFromApp = Notification.Name("ai-toolbox.configWrittenFromApp")
+    static let claudeWatchToggled = Notification.Name("ai-toolbox.claudeWatchToggled")
+    static let claudeConfigWrittenFromApp = Notification.Name("ai-toolbox.claudeConfigWrittenFromApp")
 }

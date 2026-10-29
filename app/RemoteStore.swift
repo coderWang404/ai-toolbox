@@ -1,5 +1,5 @@
 // 内置 SSH 机器来自软件自带的 remotes.json。
-// 用户添加的机器、以及内置机器的开关，写在 ~/.codex-hotswitch/remotes.json。
+// 用户添加的机器、以及内置机器的开关，写在 ~/.ai-toolbox/remotes.json。
 // 命令行同步读的是同一份文件。
 import Foundation
 
@@ -163,8 +163,7 @@ final class RemoteStore {
     }
 
     private static var userFileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex-hotswitch/remotes.json")
+        AppPaths.dataFile("remotes.json")
     }
 
     private static let fallbackBuiltin: [RemoteMachine] = []

@@ -37,7 +37,7 @@ export async function watchConfig({
     throw new Error(`找不到配置文件: ${codexConfigPath()}`);
   }
   log(`👀 正在监控 ${codexConfigPath()}`);
-  log(`   切换供应商（cc-switch 界面或 codex-hotswitch switch）后会自动重启 Codex 的 app-server。`);
+  log(`   切换供应商（cc-switch 界面或 ai-toolbox switch）后会自动重启 Codex 的 app-server。`);
   log(`   按 Ctrl-C 退出。\n`);
 
   for (;;) {

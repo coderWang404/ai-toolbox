@@ -1,6 +1,8 @@
-// Codex 热切换 — 桌面 App（主窗口 + 菜单栏图标）
-// 不重启 Codex 应用，直接热切换 cc-switch 的第三方模型供应商。
+// AI 工具箱 — 桌面 App（主窗口 + 菜单栏图标）
+// 本地 AI 小工具集合：供应商热切换、cc-switch 同步、桌面应用跟随、本地网关。
 import AppKit
+
+LegacyMigration.run()
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
@@ -16,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let backend = Backend.shared
     private lazy var watcher = ConfigWatcher(configPath: configPath)
     private lazy var claudeWatcher = ConfigWatcher(configPath: claudeProfilePath)
+    private lazy var claudeSettingsWatcher = ConfigWatcher(configPath: ccSwitchSettingsPath)
     private var providers: [ProviderSummary] = []
     private var currentId: String?
     private var menuStatus: String?
@@ -26,6 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var claudeProfilePath: String {
         NSString(string: "~/Library/Application Support/Claude-3p/configLibrary/00000000-0000-4000-8000-000000157210.json").expandingTildeInPath
+    }
+
+    private var ccSwitchSettingsPath: String {
+        NSString(string: "~/.cc-switch/settings.json").expandingTildeInPath
     }
 
     private var defaults: UserDefaults { .standard }
@@ -64,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: .claudeConfigWrittenFromApp, object: nil, queue: .main
         ) { [weak self] _ in
             self?.claudeWatcher.baselineNow()
+            self?.claudeSettingsWatcher.baselineNow()
         }
         NotificationCenter.default.addObserver(
             forName: .claudeWatchToggled, object: nil, queue: .main
@@ -73,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.startClaudeWatching()
             } else {
                 self.claudeWatcher.stop()
+                self.claudeSettingsWatcher.stop()
             }
         }
 
@@ -85,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         watcher.stop()
         claudeWatcher.stop()
+        claudeSettingsWatcher.stop()
+        Backend.shared.stopGrokGateway()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -102,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mainMenu.addItem(appMenuItem)
 
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "关于 Codex 热切换", action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(withTitle: "关于 AI 工具箱", action: #selector(showAbout), keyEquivalent: "")
             .target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "环境自检…", action: #selector(showDoctor), keyEquivalent: "")
@@ -110,14 +121,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         appMenu.addItem(withTitle: "打开 config.toml", action: #selector(openConfig), keyEquivalent: "")
             .target = self
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "隐藏 Codex 热切换", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        appMenu.addItem(withTitle: "退出 Codex 热切换", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "隐藏 AI 工具箱", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "退出 AI 工具箱", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
 
@@ -129,8 +146,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "arrow.left.arrow.right.circle.fill",
-                                     accessibilityDescription: "Codex 热切换")
-        item.button?.toolTip = "Codex 热切换（单击查看供应商）"
+                                     accessibilityDescription: "AI 工具箱")
+        item.button?.toolTip = "AI 工具箱（单击查看供应商）"
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
@@ -190,8 +207,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(openClaude)
         let claudeWatch = NSMenuItem(title: "自动跟随", action: #selector(toggleClaudeWatchFromMenu), keyEquivalent: "")
         claudeWatch.target = self
-        claudeWatch.state = claudeWatcher.isRunning ? .on : .off
+        claudeWatch.state = (claudeWatcher.isRunning || claudeSettingsWatcher.isRunning) ? .on : .off
         menu.addItem(claudeWatch)
+
+        menu.addItem(.sectionHeader(title: "智商测试"))
+        let openIq = NSMenuItem(title: "打开智商测试", action: #selector(showIqPage), keyEquivalent: "")
+        openIq.target = self
+        menu.addItem(openIq)
+
+        menu.addItem(.sectionHeader(title: "OpenCode 额度"))
+        let openQuota = NSMenuItem(title: "打开额度", action: #selector(showQuotaPage), keyEquivalent: "")
+        openQuota.target = self
+        menu.addItem(openQuota)
+
+        menu.addItem(.sectionHeader(title: "ClinePass 额度"))
+        let openCline = NSMenuItem(title: "打开额度", action: #selector(showClinePage), keyEquivalent: "")
+        openCline.target = self
+        menu.addItem(openCline)
+
+        menu.addItem(.sectionHeader(title: "Grok Bot"))
+        let openGrok = NSMenuItem(title: "打开 Grok Bot", action: #selector(showGrokPage), keyEquivalent: "")
+        openGrok.target = self
+        menu.addItem(openGrok)
+
+        menu.addItem(.sectionHeader(title: "网络测速"))
+        let openSpeed = NSMenuItem(title: "打开测速", action: #selector(showSpeedPage), keyEquivalent: "")
+        openSpeed.target = self
+        menu.addItem(openSpeed)
 
         menu.addItem(.sectionHeader(title: "cc-switch"))
         let openCc = NSMenuItem(title: "打开 cc-switch", action: #selector(showCcPage), keyEquivalent: "")
@@ -219,7 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         doctor.target = self
         menu.addItem(doctor)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "退出 Codex 热切换", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "退出 AI 工具箱", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
     }
 
@@ -250,14 +292,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showWindow()
     }
 
+    @objc private func showIqPage() {
+        windowController.selectPage(3)
+        showWindow()
+    }
+
+    @objc private func showQuotaPage() {
+        windowController.selectPage(4)
+        showWindow()
+    }
+
+    @objc private func showClinePage() {
+        windowController.selectPage(5)
+        showWindow()
+    }
+
+    @objc private func showGrokPage() {
+        windowController.selectPage(6)
+        showWindow()
+    }
+
+    @objc private func showSpeedPage() {
+        windowController.selectPage(7)
+        showWindow()
+    }
+
     @objc private func showCcPage() {
         windowController.selectPage(1)
         showWindow()
     }
 
     @objc private func toggleClaudeWatchFromMenu() {
-        if claudeWatcher.isRunning {
+        if claudeWatcher.isRunning || claudeSettingsWatcher.isRunning {
             claudeWatcher.stop()
+            claudeSettingsWatcher.stop()
             defaults.set(false, forKey: "watchClaudeEnabled")
             menuStatus = "已关闭 Claude Desktop 自动跟随"
         } else {
@@ -268,16 +336,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startClaudeWatching() {
-        claudeWatcher.onChanged = { [weak self] in
+        let follow = { [weak self] in
             guard let self else { return }
-            self.menuStatus = "检测到 Claude Desktop 网关变化，正在重新打开…"
+            self.menuStatus = "正在按 cc-switch 同步 Claude Desktop…"
             self.windowController.autoReloadClaude { [weak self] in
-                self?.menuStatus = "⚡ Claude Desktop 已跟随切换"
+                self?.menuStatus = "⚡ Claude Desktop 已按 cc-switch 同步"
             }
         }
+        claudeWatcher.onChanged = follow
+        claudeSettingsWatcher.onChanged = follow
         claudeWatcher.start()
+        claudeSettingsWatcher.start()
         defaults.set(true, forKey: "watchClaudeEnabled")
         menuStatus = "已开启 Claude Desktop 自动跟随"
+        follow()
     }
 
     @objc private func toggleRemoteFromMenu() {
@@ -358,9 +430,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func showAbout() {
         let alert = NSAlert()
-        alert.messageText = "Codex 热切换"
+        alert.messageText = "AI 工具箱"
         alert.informativeText = """
-        不重启 Codex 应用，热切换 cc-switch 管理的第三方模型供应商。
+        本地 AI 小工具集合：Codex 供应商热切换、cc-switch 同步、桌面应用跟随、Grok Bot 网关。
 
         · 原理：切换配置后只重启 Codex 的 app-server 子进程
         · Codex：自动跟随本机供应商，并把供应商配置同步到远程

@@ -1,9 +1,20 @@
-# codex-hotswitch
+# AI 工具箱
 
-在不重启 Codex 应用的前提下，热切换 cc-switch 管理的第三方模型供应商。
+本地 AI 小工具集合。核心能力是在不重启 Codex 应用的前提下，热切换 cc-switch 管理的第三方模型供应商；此外还包含 Claude Desktop 跟随、cc-switch 远程同步、Grok Bot 本地网关、额度查询和网络测速。
 
-- **桌面 App**：`Codex 热切换.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
-- **命令行版**：`codex-hotswitch` CLI（适合脚本/终端用户）
+## 包含的工具
+
+| 页面 | 作用 |
+| --- | --- |
+| Codex | 供应商热切换、自动跟随、远程同步 |
+| Claude Desktop | 跟随 cc-switch 的桌面供应商，切换后重新打开应用 |
+| Grok Bot | 读取本机登录态，在本机启动 OpenAI 兼容网关 |
+| 额度 | OpenCode Go / ClinePass 多密钥三窗口额度 |
+| 智商测试 | 用统一题目横向比较各供应商模型 |
+| 网络 | 出口信息、延迟、上下行测速 |
+
+- **桌面 App**：`AI 工具箱.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
+- **命令行版**：`ai-toolbox` CLI（适合脚本/终端用户）
 
 ![界面](docs/screenshot.png)
 
@@ -25,10 +36,10 @@ ChatGPT 应用会自动拉起新的 app-server，从而一次性刷新：模型�
 ./build-app.sh
 
 # 运行
-open "dist/Codex 热切换.app"
+open "dist/AI 工具箱.app"
 
 # 安装到应用程序目录（推荐，登录启动功能依赖标准路径）
-cp -R "dist/Codex 热切换.app" /Applications/
+cp -R "dist/AI 工具箱.app" /Applications/
 ```
 
 界面说明：
@@ -54,19 +65,19 @@ cp -R "dist/Codex 热切换.app" /Applications/
 
 ```bash
 # 方式一：直接跑
-node bin/codex-hotswitch.mjs list
+node bin/ai-toolbox.mjs list
 
 # 方式二：注册全局命令
 npm link
 
-codex-hotswitch list                    # 列出所有 codex 供应商（● = 当前）
-codex-hotswitch current                 # 查看当前供应商 + 实际生效配置 + 运行中的 app-server
-codex-hotswitch switch <名称或 ID>       # 切换供应商并热重启 Codex（核心命令）
-codex-hotswitch reload                  # 只热重启（在 cc-switch 界面切换后用这个）
-codex-hotswitch watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
-codex-hotswitch sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
-codex-hotswitch remote-status           # 查看远程正在使用的供应商和密钥尾号
-codex-hotswitch doctor                  # 环境自检
+ai-toolbox list                    # 列出所有 codex 供应商（● = 当前）
+ai-toolbox current                 # 查看当前供应商 + 实际生效配置 + 运行中的 app-server
+ai-toolbox switch <名称或 ID>       # 切换供应商并热重启 Codex（核心命令）
+ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换后用这个）
+ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
+ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
+ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
+ai-toolbox doctor                  # 环境自检
 ```
 
 常用选项：
@@ -133,7 +144,7 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 
 打开「自动跟随」和「远程同步」后，在 cc-switch 里切换供应商，本机会热重启，并把供应商、模型、端点和密钥同步到已启用的远程机器，同时重启那些机器上当前 SSH 账号的 Codex app-server。
 
-机器在界面里添加，保存在本机 `~/.codex-hotswitch/remotes.json`。登录走 `~/.ssh/config` 里的用户和密钥，不要把地址、账号或密码写进仓库。`src/remotes.json` 默认是空列表。
+机器在界面里添加，保存在本机 `~/.ai-toolbox/remotes.json`。登录走 `~/.ssh/config` 里的用户和密钥，不要把地址、账号或密码写进仓库。`src/remotes.json` 默认是空列表。
 
 ```json
 {
@@ -146,10 +157,14 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 
 同步只替换决定请求去向的字段。远程自己的项目路径、桌面设置和 MCP 保持不动。
 
+## 数据目录
+
+本地状态统一放在 `~/.ai-toolbox/`（远程机器、测速历史、密钥、测试结果）。从旧名字升级时，首次启动会自动把 `~/.codex-hotswitch/` 整体搬过来，偏好设置也会迁移。
+
 ## 目录结构
 
 ```
-bin/codex-hotswitch.mjs   CLI 入口（--json 供 App 调用）
+bin/ai-toolbox.mjs        CLI 入口（--json 供 App 调用）
 src/ccswitch-db.mjs       读取/同步 cc-switch SQLite
 src/switcher.mjs          切换编排（生成配置 → 校验 → 写入 → 同步）
 src/toml-edit.mjs         bearer token 注入 / catalog 字段管理
@@ -165,5 +180,5 @@ src/templates/            cc-switch 的模型目录模板（vendored）
 app/                      桌面 App（Swift / AppKit）
 tools/make-icon.swift     图标生成
 build-app.sh              一键构建 .app
-dist/Codex 热切换.app      构建产物
+dist/AI 工具箱.app         构建产物
 ```
