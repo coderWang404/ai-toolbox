@@ -152,7 +152,7 @@ export function findClaudeDesktopProvider(query) {
   );
 }
 
-export function readAppliedProfile() {
+export function readAppliedProfile({ includeSecrets = false } = {}) {
   const filePath = claudeDesktopProfilePath();
   if (!existsSync(filePath)) return null;
   const data = readJson(filePath);
@@ -162,13 +162,24 @@ export function readAppliedProfile() {
     baseUrl,
     host: hostOf(baseUrl),
     tokenTail: tokenTail(token),
-    token,
+    ...(includeSecrets ? { token } : {}),
     provider: data.inferenceProvider ?? null,
     scheme: data.inferenceGatewayAuthScheme ?? null,
   };
 }
 
 function providerProfile(provider) {
+  if (provider.proxyMode) {
+    const token = claudeDesktopGatewayToken();
+    return {
+      coworkEgressAllowedHosts: ["*"],
+      disableDeploymentModeChooser: true,
+      inferenceProvider: "gateway",
+      inferenceGatewayAuthScheme: "bearer",
+      inferenceGatewayBaseUrl: claudeProxyEndpoint(),
+      ...(token ? { inferenceGatewayApiKey: token } : {}),
+    };
+  }
   const baseUrl = provider.env?.ANTHROPIC_BASE_URL;
   const token = provider.env?.ANTHROPIC_AUTH_TOKEN;
   if (!baseUrl || !token) {
@@ -234,7 +245,7 @@ export function syncClaudeDesktopCurrent(providerId) {
   const settingsPath = ccSwitchSettingsPath();
   const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
   settings.currentProviderClaudeDesktop = providerId;
-  writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  writeAtomic(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 export function applyClaudeDesktopProvider(provider) {
@@ -359,7 +370,7 @@ export async function syncDesktopFromCcSwitch({ log = console.log } = {}) {
   };
 }
 
-export function claudeDesktopSummary(provider) {
+export function claudeDesktopSummary(provider, { includeSecrets = false } = {}) {
   return {
     id: provider.id,
     name: provider.name,
@@ -371,8 +382,12 @@ export function claudeDesktopSummary(provider) {
     baseUrl: provider.baseUrl,
     host: provider.host,
     tokenTail: provider.tokenTail,
-    token: provider.env?.ANTHROPIC_AUTH_TOKEN || null,
+    ...(includeSecrets ? { token: provider.env?.ANTHROPIC_AUTH_TOKEN || null } : {}),
   };
+}
+
+export function claudeDesktopRunning() {
+  return mainClaudePids().length > 0;
 }
 
 function mainClaudePids() {

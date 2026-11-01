@@ -13,7 +13,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 echo "==> 编译 Swift"
+TARGET_ARCH="$(uname -m)"
 swiftc -O -swift-version 5 \
+  -target "${TARGET_ARCH}-apple-macos14.0" \
   -o "$APP/Contents/MacOS/$EXEC_NAME" \
   "$SRC_DIR/app/"*.swift \
   -framework AppKit -framework CryptoKit -framework WebKit
@@ -27,6 +29,7 @@ rsync -a \
 
 echo "==> 内置 HTML 渲染器"
 swiftc -O -swift-version 5 \
+  -target "${TARGET_ARCH}-apple-macos14.0" \
   -o "$APP/Contents/Resources/ai-toolbox/render-html" \
   "$SRC_DIR/tools/render-html.swift" \
   -framework AppKit -framework WebKit
@@ -38,7 +41,7 @@ cp "$SRC_DIR/app/Info.plist" "$APP/Contents/Info.plist"
 
 echo "==> 生成图标"
 ICON_TMP="$(mktemp -d)"
-if swiftc -O -swift-version 5 -o "$ICON_TMP/makeicon" "$SRC_DIR/tools/make-icon.swift" -framework AppKit 2>/dev/null; then
+if swiftc -O -swift-version 5 -target "${TARGET_ARCH}-apple-macos14.0" -o "$ICON_TMP/makeicon" "$SRC_DIR/tools/make-icon.swift" -framework AppKit 2>/dev/null; then
   if "$ICON_TMP/makeicon" "$ICON_TMP/icon_1024.png" 2>/dev/null; then
     ICONSET="$ICON_TMP/AppIcon.iconset"
     mkdir -p "$ICONSET"

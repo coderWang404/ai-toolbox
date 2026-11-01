@@ -1,6 +1,6 @@
 // 读取 / 同步 cc-switch 的 SQLite 数据库（只依赖系统自带 sqlite3 CLI）。
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, chmodSync } from "node:fs";
 import { ccSwitchDbPath, ccSwitchSettingsPath } from "./paths.mjs";
 
 function sqliteJson(dbPath, sql) {
@@ -121,7 +121,10 @@ export function syncCurrentProvider(providerId) {
     if (existsSync(p)) {
       const s = JSON.parse(readFileSync(p, "utf8"));
       s.currentProviderCodex = providerId;
-      writeFileSync(p, `${JSON.stringify(s, null, 2)}\n`);
+      const tmp = `${p}.tmp-${process.pid}`;
+      writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
+      renameSync(tmp, p);
+      try { chmodSync(p, 0o600); } catch { /* 忽略 */ }
     }
   } catch (err) {
     console.warn(`[warn] 同步 cc-switch settings.json 失败: ${err.message}`);

@@ -25,11 +25,12 @@ function psSnapshot() {
 
 function classify(row) {
   const cmd = row.command;
-  const first = cmd.split(/\s+/)[0];
-  const isCodexBinary = /(^|\/)codex$/.test(first) || /(^|\/)codex\.js$/.test(first);
-  if (!isCodexBinary) return null;
+  const tokens = cmd.split(/\s+/);
+  // 兼容两种启动方式：直接执行 codex，或 node /path/to/codex.js。
+  const codexIndex = tokens.findIndex((token) => /(^|\/)codex(\.js)?$/.test(token));
+  if (codexIndex === -1) return null;
 
-  const args = cmd.split(/\s+/).slice(1);
+  const args = tokens.slice(codexIndex + 1);
   const isAppServer = args.includes("app-server") && !args.includes("proxy");
   const isDaemonUnix = isAppServer && args.includes("unix://");
 

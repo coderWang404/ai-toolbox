@@ -1,28 +1,62 @@
 // 通过临时 app-server 实例校验写入后的配置（只读，不触碰正在运行的实例）。
-import { spawn, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { CHATGPT_CODEX_BIN } from "./paths.mjs";
 
-/** 找到一个可用的 codex 二进制：优先 ChatGPT 应用内置，其次 npm 全局安装。 */
+function executable(file) {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** 在 PATH 里找一个可执行文件（GUI App 的 PATH 已由 Backend 补齐）。 */
+function which(program) {
+  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    const candidate = path.join(dir, program);
+    if (executable(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** 扫描版本目录，按数字版本从大到小排序。 */
+function versionsWith(root, suffix) {
+  if (!existsSync(root)) return [];
+  try {
+    return readdirSync(root)
+      .filter((name) => existsSync(path.join(root, name, suffix)))
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  } catch {
+    return [];
+  }
+}
+
+/** 找到一个可用的 codex 二进制：优先 ChatGPT 应用内置，其次 PATH，再其次常见安装位置。 */
 export function findCodexBinary() {
+  const home = process.env.HOME || os.homedir();
   const candidates = [
     CHATGPT_CODEX_BIN,
-    "/usr/local/bin/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    which("codex"),
     "/opt/homebrew/bin/codex",
-    `${process.env.HOME}/.local/bin/codex`,
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
+    "/usr/local/bin/codex",
+    path.join(home, ".local/bin/codex"),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (executable(candidate)) return candidate;
   }
-  // npm 全局：扫描 nvm / fnm 版本目录
-  try {
-    const found = execSync(
-      `ls -d ${process.env.HOME}/.nvm/versions/node/*/bin/codex ${process.env.HOME}/.local/share/fnm/*/bin/codex 2>/dev/null | head -1`,
-      { encoding: "utf8" },
-    ).trim();
-    if (found) return found;
-  } catch {
-    /* ignore */
+
+  for (const version of versionsWith(path.join(home, ".nvm/versions/node"), "bin/codex")) {
+    const candidate = path.join(home, ".nvm/versions/node", version, "bin/codex");
+    if (executable(candidate)) return candidate;
+  }
+  for (const version of versionsWith(path.join(home, ".local/share/fnm/node-versions"), "installation/bin/codex")) {
+    const candidate = path.join(home, ".local/share/fnm/node-versions", version, "installation/bin/codex");
+    if (executable(candidate)) return candidate;
   }
   return null;
 }
@@ -58,6 +92,9 @@ export function readEffectiveConfig({ codexBin, codexHome, timeoutMs = 20000 }) 
       done({ ok: false, error: "校验超时" });
     }, timeoutMs);
     timer.unref?.();
+
+    // 不消费 stderr 会在输出较多时把子进程堵死。
+    child.stderr.on("data", () => {});
 
     function request(method, params) {
       const id = nextId++;

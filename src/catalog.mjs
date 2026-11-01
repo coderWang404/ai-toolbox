@@ -54,6 +54,7 @@ const CONFIRMED_TEXT_ONLY_TAILS = [
 ];
 
 const NATIVE_RESPONSES_HOSTS = [
+  "deepseek.com",
   "bigmodel.cn",
   "z.ai",
   "xiaomimimo.com",
@@ -183,9 +184,10 @@ function hostMatches(url, hosts) {
   try {
     host = new URL(url.includes("://") ? url : `https://${url}`).hostname.toLowerCase();
   } catch {
-    host = url.toLowerCase();
+    return false;
   }
-  return hosts.some((h) => host === h || host.endsWith(`.${h}`) || url.toLowerCase().includes(h));
+  // 必须按主机名的域名边界匹配，避免 deepseek.com.evil.example 被当成官方域名。
+  return hosts.some((h) => host === h || host.endsWith(`.${h}`));
 }
 
 function isNativeResponsesUrl(baseUrl) {

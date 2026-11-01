@@ -1,5 +1,6 @@
 // 后端桥接：定位 Node 与内置脚本，执行 CLI 命令并解析 JSON。
 import Foundation
+import Darwin
 
 enum BackendError: LocalizedError {
     case nodeNotFound
@@ -32,6 +33,10 @@ final class Backend {
     private var grokStderr = ""
     private var speedProcess: Process?
     private var speedCancelled = false
+    private var todayProcess: Process?
+    private var todayStderr = ""
+    private let processLock = NSLock()
+    private var activeProcesses: [Process] = []
 
     static let defaultGrokPort = 8765
 
@@ -146,7 +151,8 @@ final class Backend {
     }
 
     /// 同步执行 CLI（内部会切到后台线程由调用方负责）。
-    func run(_ arguments: [String], stdin: Data? = nil, timeout: TimeInterval = 90) throws -> Data {
+    /// - Parameter withSecrets: 只有 App 里确实要复制/展示完整密钥的调用才传 true。
+    func run(_ arguments: [String], stdin: Data? = nil, timeout: TimeInterval = 90, withSecrets: Bool = false) throws -> Data {
         guard let nodePath else { throw BackendError.nodeNotFound }
         guard let scriptPath else { throw BackendError.scriptNotFound }
         if ProcessInfo.processInfo.environment["AI_TOOLBOX_DEBUG"] != nil {
@@ -155,7 +161,9 @@ final class Backend {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: nodePath)
-        process.arguments = [scriptPath] + arguments + ["--json"]
+        var args = [scriptPath] + arguments + ["--json"]
+        if withSecrets { args.append("--with-secrets") }
+        process.arguments = args
         process.environment = environment()
 
         let stdout = Pipe()
@@ -163,36 +171,95 @@ final class Backend {
         process.standardOutput = stdout
         process.standardError = stderr
         let input = Pipe()
-        if stdin != nil {
-            process.standardInput = input
-        }
+        if stdin != nil { process.standardInput = input }
 
         try process.run()
+        track(process)
+        defer { untrack(process) }
         if let stdin {
-            input.fileHandleForWriting.write(stdin)
-            try? input.fileHandleForWriting.close()
+            // 写 stdin 放到后台，先让 stdout/stderr 的读取器跑起来，避免大请求体互相堵死。
+            DispatchQueue.global(qos: .utility).async {
+                try? input.fileHandleForWriting.write(contentsOf: stdin)
+                try? input.fileHandleForWriting.close()
+            }
         }
 
-        // 超时看门狗
         let deadline = DispatchTime.now() + timeout
         let watchdog = DispatchWorkItem {
-            if process.isRunning { process.terminate() }
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                }
+            }
         }
         DispatchQueue.global().asyncAfter(deadline: deadline, execute: watchdog)
         defer { watchdog.cancel() }
 
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+        var outData = Data()
+        var errData = Data()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            outData = stdout.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errData = stderr.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
         process.waitUntilExit()
+        group.wait()
 
         if ProcessInfo.processInfo.environment["AI_TOOLBOX_DEBUG"] != nil {
             FileHandle.standardError.write("EXIT \(process.terminationStatus) out=\(outData.count)B err=\(errData.count)B\n".data(using: .utf8)!)
         }
-        if process.terminationStatus != 0, outData.isEmpty {
-            let message = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw BackendError.commandFailed(message?.isEmpty == false ? message! : "命令执行失败（退出码 \(process.terminationStatus)）")
+
+        let stdoutText = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let payloadError = Self.jsonError(in: outData)
+        if process.terminationStatus != 0 {
+            let stderrText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let message = payloadError ?? (stderrText.isEmpty ? "命令执行失败（退出码 \(process.terminationStatus)）" : stderrText)
+            throw BackendError.commandFailed(Self.redacted(message))
+        }
+        // 有些命令会以 exit 0 返回 {ok:false}；统一当成失败，避免界面显示“✔ 已切换”。
+        if let payloadError {
+            throw BackendError.commandFailed(Self.redacted(payloadError))
+        }
+        if stdoutText.isEmpty {
+            throw BackendError.badOutput("命令没有输出")
         }
         return outData
+    }
+
+    private static func jsonError(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ok = object["ok"] as? Bool, ok == false else {
+            return nil
+        }
+        if let message = object["error"] as? String, !message.isEmpty { return message }
+        return "命令返回 ok=false"
+    }
+
+    /// 错误文案里可能带出 CLI 原始 JSON（含 token），统一打码。
+    static func redacted(_ text: String) -> String {
+        var value = text
+        let patterns = [
+            "(?i)bearer\\s+[A-Za-z0-9._-]{8,}",
+            "(?i)(?:sk|oc_sk|grok)_[A-Za-z0-9_-]{8,}",
+            "(?i)\"(?:token|refreshToken|apiKey|key)\"\\s*:\\s*\"[^\"]+\"",
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                value = regex.stringByReplacingMatches(
+                    in: value,
+                    range: NSRange(value.startIndex..., in: value),
+                    withTemplate: "…"
+                )
+            }
+        }
+        return value
     }
 
     func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -201,18 +268,18 @@ final class Backend {
             return try decoder.decode(type, from: data)
         } catch {
             let raw = String(data: data, encoding: .utf8) ?? ""
-            throw BackendError.badOutput(raw)
+            throw BackendError.badOutput(Self.redacted(raw))
         }
     }
 
     // MARK: - 便捷命令
 
     func list() throws -> ListResult {
-        try decode(ListResult.self, from: run(["list"]))
+        try decode(ListResult.self, from: run(["list"], withSecrets: true))
     }
 
     func current() throws -> CurrentResult {
-        try decode(CurrentResult.self, from: run(["current"]))
+        try decode(CurrentResult.self, from: run(["current"], withSecrets: true))
     }
 
     func switchProvider(_ identifier: String, scope: String, focus: Bool, force: Bool = false, remote: Bool = true) throws -> SwitchResult {
@@ -235,12 +302,12 @@ final class Backend {
     }
 
     func remoteStatus() throws -> RemoteSyncInfo {
-        let result = try decode(RemoteStatusResult.self, from: run(["remote-status"], timeout: 40))
+        let result = try decode(RemoteStatusResult.self, from: run(["remote-status"], timeout: 40, withSecrets: true))
         return result.remote
     }
 
     func claudeList() throws -> ClaudeListResult {
-        try decode(ClaudeListResult.self, from: run(["claude-list"], timeout: 20))
+        try decode(ClaudeListResult.self, from: run(["claude-list"], timeout: 20, withSecrets: true))
     }
 
     func claudeSwitch(_ identifier: String, force: Bool = false) throws -> ClaudeSwitchResult {
@@ -296,17 +363,40 @@ final class Backend {
             controlledStdin = stdin.fileHandleForWriting
         }
         let errHandle = stderr.fileHandleForReading
+        // stderr 是逐块到达的，必须自己做行缓冲：IQ 的 STATE/HTML 标记可能被拆成多块。
+        let errLock = NSLock()
+        var errBuffer = ""
         errHandle.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            DispatchQueue.main.async { onStderr(text) }
+            errLock.lock()
+            errBuffer += text
+            var lines: [String] = []
+            while let range = errBuffer.range(of: "\n") {
+                lines.append(String(errBuffer[..<range.lowerBound]))
+                errBuffer.removeSubrange(..<range.upperBound)
+            }
+            errLock.unlock()
+            if !lines.isEmpty {
+                let payload = lines.joined(separator: "\n") + "\n"
+                DispatchQueue.main.async { onStderr(payload) }
+            }
         }
         try process.run()
+        track(process)
         let deadline = DispatchTime.now() + timeout
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        let watchdog = DispatchWorkItem {
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                }
+            }
+        }
         DispatchQueue.global().asyncAfter(deadline: deadline, execute: watchdog)
         defer {
             watchdog.cancel()
+            untrack(process)
             errHandle.readabilityHandler = nil
             if control {
                 try? stdin.fileHandleForWriting.close()
@@ -314,10 +404,31 @@ final class Backend {
                 controlledProcess = nil
             }
         }
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        var outData = Data()
+        let outGroup = DispatchGroup()
+        outGroup.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            outData = stdout.fileHandleForReading.readDataToEndOfFile()
+            outGroup.leave()
+        }
         process.waitUntilExit()
-        if process.terminationStatus != 0, outData.isEmpty {
-            throw BackendError.commandFailed("测试没有完成")
+        outGroup.wait()
+
+        errLock.lock()
+        let tail = errBuffer
+        errBuffer = ""
+        errLock.unlock()
+        if !tail.isEmpty {
+            DispatchQueue.main.async { onStderr(tail) }
+        }
+        if process.terminationStatus != 0 {
+            let message = Self.jsonError(in: outData)
+                ?? String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? ""
+            throw BackendError.commandFailed(Self.redacted(message.isEmpty ? "测试没有完成" : message))
+        }
+        if let payloadError = Self.jsonError(in: outData) {
+            throw BackendError.commandFailed(Self.redacted(payloadError))
         }
         return outData
     }
@@ -340,7 +451,7 @@ final class Backend {
     }
 
     func goKeys() throws -> GoKeyListResult {
-        try decode(GoKeyListResult.self, from: run(["go-keys"], timeout: 20))
+        try decode(GoKeyListResult.self, from: run(["go-keys"], timeout: 20, withSecrets: true))
     }
 
     func goKeysAdd(name: String, key: String, plan: String) throws -> GoKeyListResult {
@@ -352,11 +463,11 @@ final class Backend {
     }
 
     func goKeysRemove(_ id: String) throws -> GoKeyListResult {
-        try decode(GoKeyListResult.self, from: run(["go-keys-remove", id], timeout: 20))
+        try decode(GoKeyListResult.self, from: run(["go-keys-remove", id], timeout: 20, withSecrets: true))
     }
 
     func goKeysPlan(_ id: String, plan: String) throws -> GoKeyListResult {
-        try decode(GoKeyListResult.self, from: run(["go-keys-plan", id, plan], timeout: 20))
+        try decode(GoKeyListResult.self, from: run(["go-keys-plan", id, plan], timeout: 20, withSecrets: true))
     }
 
     func goKeysUse(_ id: String) throws -> GoKeyUseResult {
@@ -368,7 +479,7 @@ final class Backend {
     }
 
     func clineKeys() throws -> ClineKeyListResult {
-        try decode(ClineKeyListResult.self, from: run(["cline-keys"], timeout: 20))
+        try decode(ClineKeyListResult.self, from: run(["cline-keys"], timeout: 20, withSecrets: true))
     }
 
     func clineKeysAdd(name: String, key: String) throws -> ClineKeyListResult {
@@ -380,16 +491,16 @@ final class Backend {
     }
 
     func clineKeysRemove(_ id: String) throws -> ClineKeyListResult {
-        try decode(ClineKeyListResult.self, from: run(["cline-keys-remove", id], timeout: 20))
+        try decode(ClineKeyListResult.self, from: run(["cline-keys-remove", id], timeout: 20, withSecrets: true))
     }
 
     func clineQuota() throws -> ClineQuotaReport {
-        try decode(ClineQuotaReport.self, from: run(["cline-quota"], timeout: 60))
+        try decode(ClineQuotaReport.self, from: run(["cline-quota"], timeout: 60, withSecrets: true))
     }
 
     private func clineKeysWrite(_ arguments: [String], payload: [String: String]) throws -> ClineKeyListResult {
         let data = try JSONSerialization.data(withJSONObject: payload)
-        let result = try decode(ClineKeyListResult.self, from: run(arguments, stdin: data, timeout: 20))
+        let result = try decode(ClineKeyListResult.self, from: run(arguments, stdin: data, timeout: 20, withSecrets: true))
         if !result.ok {
             throw BackendError.commandFailed(result.error ?? "保存密钥失败")
         }
@@ -397,12 +508,12 @@ final class Backend {
     }
 
     func goQuota() throws -> GoQuotaReport {
-        try decode(GoQuotaReport.self, from: run(["go-quota"], timeout: 60))
+        try decode(GoQuotaReport.self, from: run(["go-quota"], timeout: 60, withSecrets: true))
     }
 
     private func goKeysWrite(_ arguments: [String], payload: [String: String]) throws -> GoKeyListResult {
         let data = try JSONSerialization.data(withJSONObject: payload)
-        let result = try decode(GoKeyListResult.self, from: run(arguments, stdin: data, timeout: 20))
+        let result = try decode(GoKeyListResult.self, from: run(arguments, stdin: data, timeout: 20, withSecrets: true))
         if !result.ok {
             throw BackendError.commandFailed(result.error ?? "保存密钥失败")
         }
@@ -473,8 +584,121 @@ final class Backend {
         }
     }
 
+    // MARK: - Today
+
+    var todayGatewayPort: Int {
+        let stored = UserDefaults.standard.integer(forKey: "todayPort")
+        return (1024...65535).contains(stored) ? stored : 8317
+    }
+
+    var todayGatewayBaseURL: String {
+        "http://127.0.0.1:\(todayGatewayPort)/v1"
+    }
+
+    func todayStatus() throws -> TodayStatus {
+        try decode(TodayStatus.self, from: run(
+            ["today-status", "--port", String(todayGatewayPort)],
+            timeout: 30,
+            withSecrets: true
+        ))
+    }
+
+    func todayModels() throws -> TodayModelsResult {
+        try decode(TodayModelsResult.self, from: run(["today-models"], timeout: 45))
+    }
+
+    func todayChat(text: String, model: String?) throws -> TodayChatResult {
+        var payload: [String: String] = ["text": text]
+        if let model, !model.isEmpty { payload["model"] = model }
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        return try decode(TodayChatResult.self, from: run(["today-chat"], stdin: data, timeout: 240))
+    }
+
+    func todaySetModel(_ id: String) throws -> TodayModelsResult {
+        try decode(TodayModelsResult.self, from: run(["today-model", id], timeout: 45))
+    }
+
+    func todayLaunch() throws {
+        _ = try run(["today-launch"], timeout: 45)
+    }
+
+    func todayGatewayIsRunning() -> Bool {
+        todayProcess?.isRunning == true
+    }
+
+    func startTodayGateway() throws {
+        if todayProcess?.isRunning == true { return }
+        guard let nodePath else { throw BackendError.nodeNotFound }
+        guard let scriptPath else { throw BackendError.scriptNotFound }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: nodePath)
+        process.arguments = [scriptPath, "today-serve", "--port", String(todayGatewayPort)]
+        process.environment = environment()
+        process.standardOutput = FileHandle.nullDevice
+        let err = Pipe()
+        process.standardError = err
+        todayStderr = ""
+        err.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self?.todayStderr += text
+        }
+        try process.run()
+        todayProcess = process
+        Thread.sleep(forTimeInterval: 0.8)
+        if !process.isRunning {
+            err.fileHandleForReading.readabilityHandler = nil
+            todayProcess = nil
+            let message = todayStderr
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("(node:") && !$0.hasPrefix("(Use `node") }
+                .joined(separator: "\n")
+            if message.contains("EADDRINUSE") {
+                throw BackendError.commandFailed("端口 \(todayGatewayPort) 已被占用，请换一个端口")
+            }
+            throw BackendError.commandFailed(message.isEmpty ? "Today 网关没有启动" : message)
+        }
+    }
+
+    func stopTodayGateway() {
+        if let process = todayProcess, process.isRunning { process.terminate() }
+        todayProcess = nil
+    }
+
+    private func track(_ process: Process) {
+        processLock.lock()
+        activeProcesses.append(process)
+        processLock.unlock()
+    }
+
+    private func untrack(_ process: Process) {
+        processLock.lock()
+        activeProcesses.removeAll { $0 === process }
+        processLock.unlock()
+    }
+
+    /// 退出 App 时结束所有常驻/正在跑的子进程，避免留下孤儿 node。
+    func stopAll() {
+        stopGrokGateway()
+        stopTodayGateway()
+        speedCancelled = true
+        processLock.lock()
+        let running = activeProcesses
+        activeProcesses.removeAll()
+        processLock.unlock()
+        for process in running where process.isRunning {
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+        }
+        if let process = speedProcess, process.isRunning { process.terminate() }
+        if let process = controlledProcess, process.isRunning { process.terminate() }
+    }
+
     func grokStatus() throws -> GrokStatus {
-        try decode(GrokStatus.self, from: run(["grok-status"], timeout: 30))
+        try decode(GrokStatus.self, from: run(["grok-status"], timeout: 30, withSecrets: true))
     }
 
     func grokChat(model: String, text: String) throws -> GrokChatResult {

@@ -27,6 +27,7 @@ import {
   syncDesktopFromCcSwitch,
   claudeDesktopSummary,
   claudeDesktopProfilePath,
+  claudeDesktopRunning,
 } from "../src/claude-desktop.mjs";
 import { findCodexBinary, readEffectiveConfig } from "../src/verify-client.mjs";
 import { findIqProvider, listIqProviders, publicIqProvider, resolveThinking } from "../src/iq-catalog.mjs";
@@ -35,6 +36,16 @@ import { addKeys, applySelectedKey, listKeys, parseKeyText, queryAll, removeKey,
 import { addKeys as addClineKeys, listKeys as listClineKeys, parseKeyText as parseClineKeyText, queryAll as queryClineQuota, removeKey as removeClineKey } from "../src/cline-quota.mjs";
 import { completeChat, startServer, status as grokStatus } from "../src/grok-bot.mjs";
 import { networkInfo, runSpeedTest } from "../src/net-speed.mjs";
+import {
+  todayStatus,
+  todayModels,
+  todayChat,
+  todaySetModel,
+  serveTodayGateway,
+  launchTodayWithDebugPort,
+  todayPort,
+  todayGatewayToken,
+} from "../src/today-gateway.mjs";
 import { readFileSync } from "node:fs";
 import { codexConfigPath, codexHome, ccSwitchDbPath } from "../src/paths.mjs";
 
@@ -57,14 +68,22 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox iq-list               列出可用 OpenAI 协议的供应商和模型
   ai-toolbox iq-run <供应商>       用最小运行时测试模型（--model 指定模型）
   ai-toolbox go-keys               列出本机保存的 OpenCode Go 密钥（只显示尾号）
+  ai-toolbox go-keys-plan <id> <plan> 设置密钥套餐（go|plus）
   ai-toolbox go-keys-use <id>      把这把密钥写入 cc-switch、Kimi Code、OpenCode 和 DeepSeek Harness，不改模型
   ai-toolbox go-quota              查询全部密钥的官方三窗口额度
   ai-toolbox cline-keys            列出本机保存的 ClinePass 密钥（只显示尾号）
   ai-toolbox cline-quota           查询全部 ClinePass 密钥的三窗口额度和余额
   ai-toolbox grok-status           读取本机 Grok Bot 登录、助手和网关状态
+  ai-toolbox grok-chat             向 Grok Bot 发一条消息（stdin JSON）
   ai-toolbox grok-serve            在 127.0.0.1:8765 启动 OpenAI 兼容网关
   ai-toolbox net-info              查看当前网络接口、地址和出口
   ai-toolbox net-speed             测延迟、下载和上传，并持续输出过程
+  ai-toolbox today-status          Today.app 登录态、模型目录与本地网关状态
+  ai-toolbox today-models          列出 Today 账号可用的模型
+  ai-toolbox today-chat <文本>     向 Today 助手发一条消息（--model 指定模型）
+  ai-toolbox today-model <模型>    切换 Today 的全局模型选项
+  ai-toolbox today-launch          以调试端口重启 Today.app（CDP 传输需要）
+  ai-toolbox today-serve           启动 Today 的 OpenAI 兼容网关（--port 指定端口）
   ai-toolbox doctor                检查运行环境
 
 选项:
@@ -77,6 +96,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   --dry-run             只展示将写入的配置，不落盘
   --focus / --no-focus  重启后是否把 ChatGPT 窗口切到前台（默认 focus）
   --json                以 JSON 输出（供桌面 App / 脚本调用）
+  --with-secrets        在 JSON 里包含完整密钥（默认只给尾号，供 App 复制时显式使用）
   -h, --help            显示帮助
 `;
 
@@ -119,7 +139,7 @@ function tokenTailOf(token) {
   return typeof token === "string" && token.length > 0 ? token.slice(-8) : null;
 }
 
-export function providerSummary(p) {
+export function providerSummary(p, { includeSecrets = false } = {}) {
   const baseUrl = p.config.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] ?? null;
   return {
     id: p.id,
@@ -132,12 +152,12 @@ export function providerSummary(p) {
     baseUrl,
     host: hostOf(baseUrl),
     tokenTail: tokenTailOf(p.auth?.OPENAI_API_KEY),
-    token: p.auth?.OPENAI_API_KEY || null,
+    token: includeSecrets ? p.auth?.OPENAI_API_KEY || null : null,
   };
 }
 
 /** 解析 config.toml 中实际生效的供应商表（base_url / token）。 */
-function liveProviderInfo(configText) {
+function liveProviderInfo(configText, { includeSecrets = false } = {}) {
   const providerId = configText.match(/^\s*model_provider\s*=\s*"([^"]+)"/m)?.[1] ?? null;
   const lines = configText.split(/\r?\n/);
   const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -162,7 +182,7 @@ function liveProviderInfo(configText) {
     providerId,
     baseUrl,
     tokenTail: tokenTailOf(token),
-    token,
+    ...(includeSecrets ? { token } : {}),
     host: hostOf(baseUrl),
     model: configText.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] ?? null,
   };
@@ -206,7 +226,7 @@ async function cmdList(opts) {
   const { log } = opts;
   const providers = listCodexProviders();
   const current = getCurrentProvider();
-  const summaries = providers.map(providerSummary);
+  const summaries = providers.map((provider) => providerSummary(provider, { includeSecrets: opts.secrets }));
   const currentId = current?.id ?? null;
 
   // 实际生效的配置（config.toml 是 Codex 真正读取的文件）
@@ -214,7 +234,7 @@ async function cmdList(opts) {
   const configPath = codexConfigPath();
   if (existsSync(configPath)) {
     try {
-      live = liveProviderInfo(readFileSync(configPath, "utf8"));
+      live = liveProviderInfo(readFileSync(configPath, "utf8"), { includeSecrets: opts.secrets });
     } catch {
       live = null;
     }
@@ -377,7 +397,7 @@ async function cmdSwitch(query, opts) {
   if (opts.dryRun) {
     log("\n--- 将写入的 config.toml (dry-run) ---\n");
     log(result.preview);
-    return { command: "switch", dryRun: true, provider: providerSummary(provider), preview: result.preview };
+    return { command: "switch", dryRun: true, provider: providerSummary(provider, { includeSecrets: opts.secrets }), preview: result.preview };
   }
 
   for (const w of result.warnings) log(`  ⚠️  ${w}`);
@@ -405,7 +425,7 @@ async function cmdSwitch(query, opts) {
 
   return {
     command: "switch",
-    provider: providerSummary(provider),
+    provider: providerSummary(provider, { includeSecrets: opts.secrets }),
     effective: result.effective,
     verified: result.verified,
     backupPath: result.backupPath,
@@ -450,7 +470,7 @@ function cmdCcSwitchFingerprint() {
 }
 
 async function cmdRemoteStatus(opts) {
-  const remote = await inspectRemotes();
+  const remote = await inspectRemotes({ includeSecrets: opts.secrets });
   for (const host of remote.hosts) {
     if (!host.ok) {
       opts.log(`  ❌ ${host.label}: ${host.error ?? "读取失败"}`);
@@ -472,7 +492,7 @@ function claudeLiveMatch(providers, profile) {
 async function cmdClaudeList(opts) {
   const providers = listClaudeDesktopProviders();
   const currentId = currentClaudeDesktopId();
-  const profile = readAppliedProfile();
+  const profile = readAppliedProfile({ includeSecrets: opts.secrets });
   const live = claudeLiveMatch(providers, profile);
   opts.log(`\nClaude Desktop 供应商（${providers.length}）`);
   for (const provider of providers) {
@@ -483,7 +503,7 @@ async function cmdClaudeList(opts) {
   return {
     command: "claude-list",
     currentId,
-    providers: providers.map(claudeDesktopSummary),
+    providers: providers.map((provider) => claudeDesktopSummary(provider, { includeSecrets: opts.secrets })),
     live: profile ? { ...profile, liveProviderId: live?.id ?? null } : null,
     ccSwitchRunning: isCcSwitchRunning(),
     profilePath: claudeDesktopProfilePath(),
@@ -494,7 +514,7 @@ async function cmdClaudeCurrent(opts) {
   const providers = listClaudeDesktopProviders();
   const currentId = currentClaudeDesktopId();
   const current = providers.find((item) => item.id === currentId) ?? null;
-  const profile = readAppliedProfile();
+  const profile = readAppliedProfile({ includeSecrets: opts.secrets });
   const live = claudeLiveMatch(providers, profile);
   opts.log(`\ncc-switch 记录: ${current ? `${current.name} (${current.id})` : "(未知)"}`);
   if (profile) opts.log(`桌面网关: ${profile.host ?? "-"} · key …${profile.tokenTail ?? "-"}`);
@@ -503,7 +523,7 @@ async function cmdClaudeCurrent(opts) {
     current: current ? { id: current.id, name: current.name } : null,
     profile,
     liveProviderId: live?.id ?? null,
-    running: true,
+    running: claudeDesktopRunning(),
   };
 }
 
@@ -522,14 +542,20 @@ async function cmdClaudeSwitch(query, opts) {
   opts.log(`\n🔀 Claude Desktop → ${provider.name}`);
   if (opts.dryRun) {
     opts.log(`  [dry-run] 将写入 ${provider.host}`);
-    return { command: "claude-switch", dryRun: true, provider: claudeDesktopSummary(provider) };
+    return { command: "claude-switch", dryRun: true, provider: claudeDesktopSummary(provider, { includeSecrets: opts.secrets }) };
   }
-  const profile = applyClaudeDesktopProvider(provider);
+  const applied = applyClaudeDesktopProvider(provider);
   syncClaudeDesktopCurrent(provider.id);
-  opts.log(`  已写入网关 ${profile.host} · key …${profile.tokenTail ?? "-"}`);
+  opts.log(`  已写入网关 ${applied.host} · key …${applied.tokenTail ?? "-"}`);
   let reload = null;
   if (opts.reload) reload = await restartClaudeDesktop({ log: opts.log });
-  return { command: "claude-switch", provider: claudeDesktopSummary(provider), profile, synced: true, reload };
+  return {
+    command: "claude-switch",
+    provider: claudeDesktopSummary(provider, { includeSecrets: opts.secrets }),
+    profile: opts.secrets ? applied : { ...applied, token: undefined },
+    synced: true,
+    reload,
+  };
 }
 
 async function cmdClaudeSync(opts) {
@@ -544,7 +570,7 @@ async function cmdClaudeReload(opts) {
   const providers = listClaudeDesktopProviders();
   const currentId = currentClaudeDesktopId();
   const current = providers.find((item) => item.id === currentId) ?? null;
-  const profile = readAppliedProfile();
+  const profile = readAppliedProfile({ includeSecrets: opts.secrets });
   if (current) opts.log(`\n当前: ${current.name} · ${profile?.host ?? "-"}`);
   const reload = opts.dryRun
     ? { dryRun: true, wasRunning: false, restarted: false, pid: null }
@@ -582,12 +608,59 @@ async function cmdIqRun(query, opts) {
   return { command: "iq-run", ...result, provider: publicIqProvider(provider) };
 }
 
+async function cmdTodayStatus(opts) {
+  const info = await todayStatus({ port: opts.port ?? todayPort(), includeSecrets: opts.secrets });
+  if (!opts.json) {
+    opts.log(`\nToday CDP: ${info.cdp?.reachable ? "已连接" : "不可达"}`);
+    if (info.pageUrl) opts.log(`页面: ${info.pageUrl}`);
+    if (info.currentModel) opts.log(`当前模型: ${info.currentModel}`);
+    for (const model of info.models ?? []) opts.log(`  ${model.id}  ${model.title ?? ""}`);
+    opts.log(`网关: ${info.gateway?.running ? "运行中" : "未启动"} ${info.gateway?.baseUrl ?? ""}`);
+    if (info.error) opts.log(`⚠️ ${info.error}`);
+  }
+  return info;
+}
+
+async function cmdTodayChat(query, opts) {
+  const body = await readStdinJson();
+  const text = typeof query === "string" && query.trim() ? query : body.text;
+  const model = opts.model ?? body.model ?? null;
+  const result = await todayChat({ text, model });
+  if (!opts.json) {
+    opts.log(`\n${result.model ?? "Today"}:`);
+    opts.log(result.reply);
+  }
+  return result;
+}
+
+async function cmdTodayServe(opts) {
+  const port = opts.port ?? todayPort();
+  const apiKey = todayGatewayToken();
+  const { server, client } = await serveTodayGateway({ port, apiKey });
+  const address = server.address();
+  console.log(JSON.stringify({
+    ok: true,
+    command: "today-serve",
+    port: typeof address === "object" && address ? address.port : port,
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    ...(opts.secrets ? { apiKey } : {}),
+  }));
+  const shutdown = () => {
+    try { client.close(); } catch { /* 忽略 */ }
+    server.close(() => process.exit(0));
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  await new Promise(() => {});
+}
+
 async function cmdWatch(opts) {
   await watchConfig({
     intervalMs: 800,
     scope: opts.scope,
     drainTimeoutMs: opts.drainMs,
     dryRun: opts.dryRun,
+    hard: opts.hard,
     syncRemote: opts.remote,
     json: opts.json,
     log: opts.json
@@ -641,30 +714,37 @@ async function readStdinJson() {
   return JSON.parse(text);
 }
 
-function cmdGoKeys() {
-  return { command: "go-keys", keys: listKeys() };
+function cmdGoKeys(opts) {
+  return { command: "go-keys", keys: listKeys({ includeSecrets: opts.secrets }) };
 }
 
-async function cmdGoKeysAdd() {
+async function cmdGoKeysAdd(opts) {
   const body = await readStdinJson();
   const plan = body.plan === "plus" ? "plus" : "go";
   const entries = body.text != null ? parseKeyText(body.text) : [{ name: body.name, key: body.key }];
-  const result = addKeys(entries, plan);
+  const result = addKeys(entries, plan, { includeSecrets: opts.secrets });
   return { command: "go-keys-add", keys: result.keys, added: result.added };
 }
 
-function cmdGoKeysRemove(id) {
+function cmdGoKeysRemove(id, opts) {
   if (!id) throw new Error("用法: ai-toolbox go-keys-remove <id>");
-  return { command: "go-keys-remove", keys: removeKey(id) };
+  return { command: "go-keys-remove", keys: removeKey(id, { includeSecrets: opts.secrets }) };
 }
 
-function cmdGoKeysPlan(id, plan) {
+function cmdGoKeysPlan(id, plan, opts) {
   if (!id || !plan) throw new Error("用法: ai-toolbox go-keys-plan <id> <go|plus>");
-  return { command: "go-keys-plan", keys: setPlan(id, plan) };
+  return { command: "go-keys-plan", keys: setPlan(id, plan, { includeSecrets: opts.secrets }) };
 }
 
-async function cmdGrokStatus() {
-  return grokStatus();
+async function cmdGrokStatus(opts) {
+  const info = await grokStatus({ includeSecrets: opts.secrets });
+  if (!opts.json) {
+    if (info.email) opts.log(`\nGrok Bot: ${info.email}`);
+    opts.log(`网关: ${info.gateway?.running ? "运行中" : "未启动"} ${info.gateway?.baseUrl ?? ""}`);
+    for (const agent of info.agents ?? []) opts.log(`  ${agent.name}  ${agent.legacyAgentId ?? agent.id}`);
+    if (info.error) opts.log(`⚠️ ${info.error}`);
+  }
+  return info;
 }
 
 async function cmdGrokChat() {
@@ -680,20 +760,20 @@ async function cmdGrokServe() {
   await new Promise(() => {});
 }
 
-function cmdClineKeys() {
-  return { command: "cline-keys", keys: listClineKeys() };
+function cmdClineKeys(opts) {
+  return { command: "cline-keys", keys: listClineKeys({ includeSecrets: opts.secrets }) };
 }
 
-async function cmdClineKeysAdd() {
+async function cmdClineKeysAdd(opts) {
   const body = await readStdinJson();
   const entries = body.text != null ? parseClineKeyText(body.text) : [{ name: body.name, key: body.key }];
-  const result = addClineKeys(entries);
+  const result = addClineKeys(entries, { includeSecrets: opts.secrets });
   return { command: "cline-keys-add", keys: result.keys, added: result.added };
 }
 
-function cmdClineKeysRemove(id) {
+function cmdClineKeysRemove(id, opts) {
   if (!id) throw new Error("用法: ai-toolbox cline-keys-remove <id>");
-  return { command: "cline-keys-remove", keys: removeClineKey(id) };
+  return { command: "cline-keys-remove", keys: removeClineKey(id, { includeSecrets: opts.secrets }) };
 }
 
 async function cmdGoKeysUse(id) {
@@ -712,6 +792,7 @@ async function main() {
       "no-reload": { type: "boolean", default: false },
       "no-remote": { type: "boolean", default: false },
       "dry-run": { type: "boolean", default: false },
+      "with-secrets": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       host: { type: "string", multiple: true },
       focus: { type: "boolean" },
@@ -720,6 +801,7 @@ async function main() {
       model: { type: "string" },
       thinking: { type: "string" },
       topic: { type: "string" },
+      port: { type: "string" },
     },
   });
 
@@ -736,11 +818,13 @@ async function main() {
     hard: values.hard,
     force: values.force,
     dryRun: values["dry-run"],
+    secrets: values["with-secrets"],
     focus: values["no-focus"] ? false : values.focus !== false,
     hosts: values.host ?? [],
     model: values.model,
     thinking: values.thinking,
     topic: values.topic,
+    port: values.port ? Number(values.port) : null,
   };
 
   const [command, arg] = positionals;
@@ -804,37 +888,65 @@ async function main() {
       result = await cmdIqRun(arg, opts);
       break;
     case "go-keys":
-      result = cmdGoKeys();
+      result = cmdGoKeys(opts);
+      if (!json) for (const key of result.keys) log(`${key.name}  …${key.tail}  ${key.plan}`);
       break;
     case "go-keys-add":
-      result = await cmdGoKeysAdd();
+      result = await cmdGoKeysAdd(opts);
       break;
     case "go-keys-remove":
-      result = cmdGoKeysRemove(arg);
+      result = cmdGoKeysRemove(arg, opts);
       break;
     case "go-keys-plan":
-      result = cmdGoKeysPlan(arg, positionals[2]);
+      result = cmdGoKeysPlan(arg, positionals[2], opts);
       break;
     case "go-keys-use":
       result = await cmdGoKeysUse(arg);
       break;
     case "go-quota":
-      result = await queryAll();
+      result = await queryAll({ includeSecrets: opts.secrets });
+      if (!json) {
+        for (const key of result.keys) {
+          if (!key.ok) {
+            log(`${key.name} …${key.tail} 查询失败: ${key.error}`);
+            continue;
+          }
+          const parts = ["rolling", "weekly", "monthly"].map((name) => {
+            const window = key.windows?.[name];
+            return window ? `${name} ${window.percent}%` : `${name} -`;
+          });
+          log(`${key.name} …${key.tail}  ${parts.join(" · ")}`);
+        }
+      }
       break;
     case "cline-keys":
-      result = cmdClineKeys();
+      result = cmdClineKeys(opts);
+      if (!json) for (const key of result.keys) log(`${key.name}  …${key.tail}`);
       break;
     case "cline-keys-add":
-      result = await cmdClineKeysAdd();
+      result = await cmdClineKeysAdd(opts);
       break;
     case "cline-keys-remove":
-      result = cmdClineKeysRemove(arg);
+      result = cmdClineKeysRemove(arg, opts);
       break;
     case "cline-quota":
-      result = await queryClineQuota();
+      result = await queryClineQuota({ includeSecrets: opts.secrets });
+      if (!json) {
+        for (const key of result.keys) {
+          if (!key.ok) {
+            log(`${key.name} …${key.tail} 查询失败: ${key.error}`);
+            continue;
+          }
+          const parts = ["rolling", "weekly", "monthly"].map((name) => {
+            const window = key.windows?.[name];
+            return window ? `${name} ${window.percent}%` : `${name} -`;
+          });
+          log(`${key.name} …${key.tail}  余额 ${key.balance ?? "-"}  ${parts.join(" · ")}`);
+        }
+      }
       break;
     case "grok-status":
-      result = await cmdGrokStatus();
+      result = await cmdGrokStatus(opts);
       break;
     case "grok-chat":
       result = await cmdGrokChat();
@@ -847,6 +959,28 @@ async function main() {
       break;
     case "net-speed":
       await runSpeedTest((event) => console.log(JSON.stringify(event)));
+      return;
+    case "today-status":
+      result = await cmdTodayStatus(opts);
+      break;
+    case "today-models":
+      result = await todayModels();
+      if (!json) {
+        for (const model of result.models ?? []) log(`${model.id}  ${model.title ?? ""}`);
+      }
+      break;
+    case "today-chat":
+      result = await cmdTodayChat(arg, opts);
+      break;
+    case "today-model":
+      if (!arg) throw new Error("用法: ai-toolbox today-model <模型ID>");
+      result = await todaySetModel(arg);
+      break;
+    case "today-launch":
+      result = { command: "today-launch", ...(await launchTodayWithDebugPort()) };
+      break;
+    case "today-serve":
+      await cmdTodayServe(opts);
       return;
     case "doctor":
       result = cmdDoctor(opts);

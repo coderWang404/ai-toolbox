@@ -54,8 +54,10 @@ function readStore() {
 
 function writeStore(store) {
   const path = keysPath();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(store, null, 2), { mode: 0o600 });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, path);
   chmodSync(path, 0o600);
 }
 
@@ -64,12 +66,18 @@ export function tailOf(key) {
   return text.length >= 4 ? text.slice(-4) : "";
 }
 
-export function publicKey(item) {
-  return { id: item.id, name: item.name, tail: tailOf(item.key), key: item.key, plan: item.plan === "plus" ? "plus" : "go" };
+export function publicKey(item, { includeSecrets = false } = {}) {
+  return {
+    id: item.id,
+    name: item.name,
+    tail: tailOf(item.key),
+    ...(includeSecrets ? { key: item.key } : {}),
+    plan: item.plan === "plus" ? "plus" : "go",
+  };
 }
 
-export function listKeys() {
-  return readStore().keys.map(publicKey);
+export function listKeys({ includeSecrets = false } = {}) {
+  return readStore().keys.map((item) => publicKey(item, { includeSecrets }));
 }
 
 function normalizePlan(plan) {
@@ -99,7 +107,7 @@ export function parseKeyText(text) {
   return rows;
 }
 
-export function addKeys(entries, plan = "go") {
+export function addKeys(entries, plan = "go", { includeSecrets = false } = {}) {
   const store = readStore();
   const names = new Set(store.keys.map((item) => item.name));
   const seen = new Set(store.keys.map((item) => item.key));
@@ -115,26 +123,26 @@ export function addKeys(entries, plan = "go") {
     added += 1;
   }
   writeStore(store);
-  return { keys: store.keys.map(publicKey), added };
+  return { keys: store.keys.map((item) => publicKey(item, { includeSecrets })), added };
 }
 
-export function removeKey(id) {
+export function removeKey(id, { includeSecrets = false } = {}) {
   const store = readStore();
   const next = store.keys.filter((item) => item.id !== id);
   if (next.length === store.keys.length) throw new Error("找不到这个密钥");
   store.keys = next;
   writeStore(store);
-  return store.keys.map(publicKey);
+  return store.keys.map((item) => publicKey(item, { includeSecrets }));
 }
 
-export function setPlan(id, plan) {
+export function setPlan(id, plan, { includeSecrets = false } = {}) {
   if (plan !== "go" && plan !== "plus") throw new Error("套餐只能是 go 或 plus");
   const store = readStore();
   const item = store.keys.find((key) => key.id === id);
   if (!item) throw new Error("找不到这个密钥");
   item.plan = plan;
   writeStore(store);
-  return store.keys.map(publicKey);
+  return store.keys.map((item) => publicKey(item, { includeSecrets }));
 }
 
 async function fetchUsage(key) {
@@ -160,19 +168,20 @@ async function fetchUsage(key) {
   const windows = {};
   for (const spec of WINDOWS) {
     const item = usage[spec.key] ?? {};
+    const percent = Number(item.percent ?? 0);
     windows[spec.key] = {
       status: String(item.status ?? "unknown"),
-      percent: Number(item.percent ?? 0),
+      percent: Number.isFinite(percent) ? percent : 0,
       resetsAt: item.resetsAt ?? null,
     };
   }
   return { windows, latencyMs: Date.now() - started };
 }
 
-export async function queryAll() {
+export async function queryAll({ includeSecrets = false } = {}) {
   const store = readStore();
   const keys = await Promise.all(store.keys.map(async (item) => {
-    const pub = publicKey(item);
+    const pub = publicKey(item, { includeSecrets });
     try {
       const usage = await fetchUsage(item.key);
       return { ...pub, ok: true, latencyMs: usage.latencyMs, error: null, windows: usage.windows };
@@ -216,8 +225,8 @@ function replaceKeyFields(value, key) {
 }
 
 function writeJson(path, data) {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, path);
   chmodSync(path, 0o600);
@@ -553,17 +562,19 @@ export async function applySelectedKey(id) {
   const item = store.keys.find((key) => key.id === id);
   if (!item) throw new Error("找不到这个密钥");
   const known = new Set(store.keys.map((entry) => entry.key));
+  // 先确认 cc-switch 里确实有 Go 供应商，避免其它应用已经写了一半才发现失败。
+  const ccUpdated = applyCcSwitch(item.key, known);
+  if (!ccUpdated.length) {
+    throw new Error("cc-switch 里没有指向 OpenCode Go 的供应商");
+  }
   const updated = [
-    ...applyCcSwitch(item.key, known),
+    ...ccUpdated,
     ...applyOpenCode(item.key),
     ...applyKimiCode(item.key),
     ...applyLiveCodex(item.key),
     ...applyLiveClaudeDesktop(item.key),
     ...applyDeepSeekHarness(item.key),
   ];
-  if (!updated.some((entry) => entry.target === "cc-switch")) {
-    throw new Error("cc-switch 里没有指向 OpenCode Go 的供应商");
-  }
   const opencode = await restartOpenCode();
   const harness = await restartDeepSeekHarness();
   const kimi = await restartApp("Kimi Code", "/Applications/Kimi Code.app/Contents/MacOS/Kimi Code");

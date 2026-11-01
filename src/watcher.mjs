@@ -28,6 +28,7 @@ export async function watchConfig({
   drainTimeoutMs = 8000,
   once = false,
   dryRun = false,
+  hard = false,
   syncRemote = true,
   log = console.log,
   onReload = null,
@@ -58,13 +59,6 @@ export async function watchConfig({
     const { appServers, tuis } = discoverCodexProcesses();
     const targets = selectTargets(appServers, scope);
     log(`🔁 检测到配置变化 ${new Date().toLocaleTimeString()} — ${dryRun ? "[dry-run] 将重启" : "重启"} ${targets.length} 个 app-server`);
-    if (syncRemote) {
-      try {
-        await syncRemotes({ dryRun, log });
-      } catch (err) {
-        log(`   ⚠️  远程同步失败: ${err.message}`);
-      }
-    }
     if (tuis.length) {
       log(`   ⚠️  检测到 ${tuis.length} 个终端 codex 会话：它们需要自行重启才能生效`);
     }
@@ -75,7 +69,15 @@ export async function watchConfig({
       if (once) return { targets, outcomes: [] };
       continue;
     }
-    const result = await reloadAppServers({ scope, drainTimeoutMs, log });
+    const result = await reloadAppServers({ scope, drainTimeoutMs, hard, log });
+    // 先让本机热重启生效，再做 SSH 同步：远程不可达时不应该拖住本机。
+    if (syncRemote) {
+      try {
+        await syncRemotes({ dryRun, log });
+      } catch (err) {
+        log(`   ⚠️  远程同步失败: ${err.message}`);
+      }
+    }
     const killed = result.outcomes.filter((o) => o.outcome === "killed").length;
     if (result.outcomes.length) {
       log(

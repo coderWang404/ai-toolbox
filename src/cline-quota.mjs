@@ -1,7 +1,7 @@
 // ClinePass 额度：多密钥查官方三窗口和账户余额。
 // 密钥只落在 ~/.ai-toolbox/clinepass-keys.json。
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { dataFile } from "./paths.mjs";
 
@@ -40,8 +40,10 @@ function readStore() {
 
 function writeStore(store) {
   const path = keysPath();
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(store, null, 2), { mode: 0o600 });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, path);
   chmodSync(path, 0o600);
 }
 
@@ -50,12 +52,17 @@ function tailOf(key) {
   return text.length >= 4 ? text.slice(-4) : "";
 }
 
-function publicKey(item) {
-  return { id: item.id, name: item.name, tail: tailOf(item.key), key: item.key };
+function publicKey(item, { includeSecrets = false } = {}) {
+  return {
+    id: item.id,
+    name: item.name,
+    tail: tailOf(item.key),
+    ...(includeSecrets ? { key: item.key } : {}),
+  };
 }
 
-export function listKeys() {
-  return readStore().keys.map(publicKey);
+export function listKeys({ includeSecrets = false } = {}) {
+  return readStore().keys.map((item) => publicKey(item, { includeSecrets }));
 }
 
 function defaultName(key, used) {
@@ -81,7 +88,7 @@ export function parseKeyText(text) {
   return rows;
 }
 
-export function addKeys(entries) {
+export function addKeys(entries, { includeSecrets = false } = {}) {
   const store = readStore();
   const names = new Set(store.keys.map((item) => item.name));
   const seen = new Set(store.keys.map((item) => item.key));
@@ -97,16 +104,16 @@ export function addKeys(entries) {
     added += 1;
   }
   writeStore(store);
-  return { keys: store.keys.map(publicKey), added };
+  return { keys: store.keys.map((item) => publicKey(item, { includeSecrets })), added };
 }
 
-export function removeKey(id) {
+export function removeKey(id, { includeSecrets = false } = {}) {
   const store = readStore();
   const next = store.keys.filter((item) => item.id !== id);
   if (next.length === store.keys.length) throw new Error("找不到这个密钥");
   store.keys = next;
   writeStore(store);
-  return store.keys.map(publicKey);
+  return store.keys.map((item) => publicKey(item, { includeSecrets }));
 }
 
 function clientHeaders(key) {
@@ -148,9 +155,9 @@ function money(micro) {
   return `$${dollars.toFixed(4)}`;
 }
 
-async function fetchOne(item) {
+async function fetchOne(item, { includeSecrets = false } = {}) {
   const started = Date.now();
-  const pub = publicKey(item);
+  const pub = publicKey(item, { includeSecrets });
   try {
     const limitsTask = clineGet(item.key, "/users/me/plan/usage-limits");
     const meTask = clineGet(item.key, "/users/me");
@@ -171,7 +178,8 @@ async function fetchOne(item) {
     for (const spec of WINDOWS) {
       const found = limits.find((entry) => entry?.type === spec.type);
       if (!found) continue;
-      const percent = Number(found.percentUsed ?? 0);
+      const rawPercent = Number(found.percentUsed ?? 0);
+      const percent = Number.isFinite(rawPercent) ? rawPercent : 0;
       windows[spec.key] = {
         status: percent >= 100 ? "rate-limited" : "ok",
         percent,
@@ -210,7 +218,7 @@ async function fetchOne(item) {
   }
 }
 
-export async function queryAll() {
-  const keys = await Promise.all(readStore().keys.map((item) => fetchOne(item)));
+export async function queryAll({ includeSecrets = false } = {}) {
+  const keys = await Promise.all(readStore().keys.map((item) => fetchOne(item, { includeSecrets })));
   return { command: "cline-quota", fetchedAt: new Date().toISOString(), keys };
 }

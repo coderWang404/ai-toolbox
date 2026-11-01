@@ -436,6 +436,7 @@ struct GrokGatewayInfo: Codable {
     let running: Bool
     let port: Int
     let baseUrl: String
+    let token: String?
 }
 
 struct GrokStatus: Codable {
@@ -481,4 +482,55 @@ struct ClaudeSyncResult: Codable {
     let current: ProviderRef?
     let reload: ClaudeReloadDetail?
     let reason: String?
+}
+
+// MARK: - Today
+
+struct TodayModel: Codable {
+    let id: String
+    let title: String?
+    let subtitle: String?
+    let availability: String?
+    let disabled: Bool?
+}
+
+struct TodayCDPInfo: Codable {
+    let reachable: Bool
+    let browser: String?
+    let error: String?
+}
+
+struct TodayGatewayInfo: Codable {
+    let running: Bool
+    let port: Int
+    let baseUrl: String
+    let status: String?
+    let apiKey: String?
+}
+
+struct TodayStatus: Codable {
+    let ok: Bool?
+    let cdp: TodayCDPInfo?
+    let pageUrl: String?
+    let currentModel: String?
+    let models: [TodayModel]?
+    let gateway: TodayGatewayInfo?
+    let error: String?
+}
+
+struct TodayModelsResult: Codable {
+    let ok: Bool?
+    let currentModel: String?
+    let models: [TodayModel]?
+    let error: String?
+}
+
+struct TodayChatResult: Codable {
+    let ok: Bool?
+    let reply: String?
+    let model: String?
+    let threadId: String?
+    let messageId: String?
+    let elapsedMs: Int?
+    let error: String?
 }

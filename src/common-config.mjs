@@ -8,11 +8,12 @@ function isBlankOrComment(line) {
 }
 
 export function sectionPathOf(line) {
-  const m = line.match(/^\s*\[([^\]]+)\]\s*(#.*)?$/);
+  const array = /^\s*\[\[/.test(line);
+  const m = array
+    ? line.match(/^\s*\[\[([\s\S]+?)\]\]\s*(#.*)?$/)
+    : line.match(/^\s*\[([^\]]+)\]\s*(#.*)?$/);
   if (!m) return null;
   const inner = m[1].trim();
-  // 不支持数组表 [[...]]
-  if (inner.startsWith("[")) return null;
   const parts = [];
   let buf = "";
   let inQuote = false;
@@ -98,14 +99,33 @@ export function parseBlocks(text) {
     if (key === null) {
       throw new Error(`无法解析的 TOML 行: ${line.trim().slice(0, 80)}`);
     }
-    if (!isBalanced(line)) {
-      throw new Error(`不支持多行 TOML 值: ${line.trim().slice(0, 80)}`);
+    // 多行数组/内联表：一直吃到括号与引号闭合为止。
+    let endIdx = i;
+    let text = line;
+    while (!isBalanced(text) && endIdx + 1 < lines.length) {
+      endIdx += 1;
+      text += `\n${lines[endIdx]}`;
     }
-    const entry = { key, line, idx: i };
+    if (!isBalanced(text)) {
+      throw new Error(`无法解析的多行 TOML 值: ${line.trim().slice(0, 80)}`);
+    }
+    const entry = { key, line: text, idx: i, endIdx };
     if (current) current.entries.push(entry);
     else top.push(entry);
+    i = endIdx;
   }
   return { top, sections };
+}
+
+/** 找到某个键对应的赋值块结束行（支持多行值）。 */
+function entryEnd(lines, startIdx) {
+  let text = lines[startIdx];
+  let end = startIdx;
+  while (!isBalanced(text) && end + 1 < lines.length) {
+    end += 1;
+    text += `\n${lines[end]}`;
+  }
+  return end;
 }
 
 function findSection(lines, path) {
@@ -139,7 +159,8 @@ export function mergeCommonConfig(configText, snippetText) {
         !lines.slice(0, i).some((prev) => sectionPathOf(prev)),
     );
     if (idx !== -1) {
-      lines[idx] = entry.line;
+      const oldEnd = entryEnd(lines, idx);
+      lines.splice(idx, oldEnd - idx + 1, ...entry.line.split("\n"));
     } else {
       let insertAt = lines.length;
       for (let i = 0; i < lines.length; i++) {
@@ -150,7 +171,7 @@ export function mergeCommonConfig(configText, snippetText) {
       }
       let j = insertAt;
       while (j > 0 && isBlankOrComment(lines[j - 1])) j--;
-      lines.splice(j, 0, entry.line);
+      lines.splice(j, 0, ...entry.line.split("\n"));
     }
   }
 
@@ -162,22 +183,28 @@ export function mergeCommonConfig(configText, snippetText) {
       const anchor = prevPlacedPath ? findSection(lines, prevPlacedPath) : -1;
       const insertAt =
         anchor !== -1 ? sectionEnd(lines, anchor) : firstSectionIndex(lines);
-      const block = [...section.entries.map((e) => e.line)];
+      const block = section.entries.flatMap((e) => e.line.split("\n"));
       const beforeBlank = insertAt > 0 && lines[insertAt - 1].trim() !== "" ? [""] : [];
       const afterBlank = insertAt < lines.length && lines[insertAt].trim() !== "" ? [""] : [];
       lines.splice(insertAt, 0, ...beforeBlank, section.header, ...block, ...afterBlank);
     } else {
-      const end = sectionEnd(lines, headerIdx);
       const missing = [];
       for (const entry of section.entries) {
+        const end = sectionEnd(lines, headerIdx);
         const existing = lines
           .slice(headerIdx + 1, end)
           .findIndex((l) => !isBlankOrComment(l) && keyOf(l) === entry.key);
-        if (existing !== -1) lines[headerIdx + 1 + existing] = entry.line;
-        else missing.push(entry.line);
+        if (existing !== -1) {
+          const abs = headerIdx + 1 + existing;
+          const oldEnd = entryEnd(lines, abs);
+          lines.splice(abs, oldEnd - abs + 1, ...entry.line.split("\n"));
+        } else {
+          missing.push(...entry.line.split("\n"));
+        }
       }
       if (missing.length) {
         // 插到节内最后一个非空行之后（保持原有空行分隔）
+        const end = sectionEnd(lines, headerIdx);
         let insertAt = end;
         while (insertAt > headerIdx + 1 && isBlankOrComment(lines[insertAt - 1])) insertAt--;
         lines.splice(insertAt, 0, ...missing);
@@ -312,16 +339,35 @@ export function extractSections(text, namespaces) {
   for (const line of lines) {
     const path = sectionPathOf(line);
     if (path) {
-      current = namespaces.includes(path[0]) ? { header: line, entries: [] } : null;
-      if (current) out.push(current.header);
+      // [[数组表]] 也算一个 section；整块保留，避免把数组项塞进上一个表。
+      current = namespaces.includes(path[0]);
+      if (current) out.push(line);
       continue;
     }
     if (!current) continue;
     if (isBlankOrComment(line)) continue;
-    if (keyOf(line) !== null) {
-      out.push(line);
-      current.entries.push(line);
-    }
+    // 保留原样（包括多行数组的续行），只要它在目标命名空间内。
+    out.push(line);
   }
   return out.length ? `${out.join("\n")}\n` : "";
+}
+
+/**
+ * 删除指定顶层命名空间下的所有 section（含子表与数组表），其余内容原样保留。
+ * 与 extractSections 配合，实现“live 的界面级配置整体覆盖供应商存档”的语义。
+ */
+export function stripSections(text, namespaces) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let dropping = false;
+  for (const line of lines) {
+    const path = sectionPathOf(line);
+    if (path) {
+      dropping = namespaces.includes(path[0]);
+      if (!dropping) out.push(line);
+      continue;
+    }
+    if (!dropping) out.push(line);
+  }
+  return out.join("\n");
 }

@@ -66,6 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.currentId = currentId
             self?.updateStatusTitle()
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--page"),
+           index + 1 < CommandLine.arguments.count,
+           let page = Int(CommandLine.arguments[index + 1]) {
+            windowController.selectPage(page)
+        }
 
         NotificationCenter.default.addObserver(
             forName: .claudeConfigWrittenFromApp, object: nil, queue: .main
@@ -95,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         watcher.stop()
         claudeWatcher.stop()
         claudeSettingsWatcher.stop()
-        Backend.shared.stopGrokGateway()
+        Backend.shared.stopAll()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -235,6 +240,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openSpeed.target = self
         menu.addItem(openSpeed)
 
+        menu.addItem(.sectionHeader(title: "Today"))
+        let openToday = NSMenuItem(title: "打开 Today", action: #selector(showTodayPage), keyEquivalent: "")
+        openToday.target = self
+        menu.addItem(openToday)
+
         menu.addItem(.sectionHeader(title: "cc-switch"))
         let openCc = NSMenuItem(title: "打开 cc-switch", action: #selector(showCcPage), keyEquivalent: "")
         openCc.target = self
@@ -319,6 +329,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showCcPage() {
         windowController.selectPage(1)
+        showWindow()
+    }
+
+    @objc private func showTodayPage() {
+        windowController.selectPage(8)
         showWindow()
     }
 
@@ -438,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         · Codex：自动跟随本机供应商，并把供应商配置同步到远程
         · Claude Desktop：跟随 cc-switch 的桌面供应商，重新打开应用后生效
         · cc-switch：以本机配置为准，实时同步远程的供应商、端点和当前选择
+        · Today：通过 CDP 使用 Today.app，并导出独立的 OpenAI 兼容网关
         · 工具目录：\(backend.scriptPath.map { URL(fileURLWithPath: $0).deletingLastPathComponent().deletingLastPathComponent().path } ?? "未找到")
         """
         alert.alertStyle = .informational

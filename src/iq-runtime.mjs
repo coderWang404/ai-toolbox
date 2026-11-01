@@ -1,6 +1,6 @@
 // 智商测试：在独立工作目录里嵌一套最小的 pi，用完即回收。
 // cc-switch 只读。渠道的协议差异在这里适配，不写回 cc-switch。
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { dataDir, dataFile } from "./paths.mjs";
@@ -76,11 +76,20 @@ function runsRoot() {
 function clearPreviousRuns() {
   const root = runsRoot();
   if (!existsSync(root)) return;
+  const keep = new Set(
+    readdirSync(root)
+      .sort()
+      .slice(-5),
+  );
   for (const name of readdirSync(root)) {
-    rmSync(path.join(root, name), { recursive: true, force: true });
+    const dir = path.join(root, name);
+    if (!keep.has(name)) {
+      rmSync(dir, { recursive: true, force: true });
+      continue;
+    }
+    // 上次被强杀时 .pi/models.json 可能还在，里面有 apiKey，启动时先清掉。
+    rmSync(path.join(dir, ".pi"), { recursive: true, force: true });
   }
-  const last = lastRunPath();
-  if (existsSync(last)) rmSync(last, { force: true });
 }
 
 export function lastRunPath() {
@@ -288,7 +297,8 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
   clearPreviousRuns();
   const dir = path.join(runsRoot(), new Date().toISOString().replace(/[:.]/g, "-"));
   const agentDir = path.join(dir, ".pi");
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { chmodSync(dir, 0o700); } catch { /* 忽略 */ }
   const started = Date.now();
   const htmlFile = htmlPathOf(dir);
   let announced = false;
@@ -442,7 +452,11 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
     inspect,
     prompt: task,
   };
-  writeFileSync(lastRunPath(), `${JSON.stringify(summary, null, 2)}\n`);
+  writeFileSync(lastRunPath(), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
+  try { chmodSync(lastRunPath(), 0o600); } catch { /* 忽略 */ }
+  if (existsSync(htmlFile)) {
+    try { chmodSync(htmlFile, 0o600); } catch { /* 忽略 */ }
+  }
   if (control.cancelled) {
     log("STEP 已取消");
     return summary;

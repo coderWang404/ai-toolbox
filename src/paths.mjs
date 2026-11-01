@@ -63,5 +63,5 @@ export function ccSwitchSettingsPath() {
   return path.join(ccSwitchDir(), "settings.json");
 }
 
-/** ChatGPT 桌面应用内置的 codex 二进制（app-server 的父进程标识）。 */
+/** ChatGPT 桌面应用内置的 codex 二进制（不同版本路径不同，verify-client 还会继续找 codex-cli/bin/codex）。 */
 export const CHATGPT_CODEX_BIN = "/Applications/ChatGPT.app/Contents/Resources/codex";

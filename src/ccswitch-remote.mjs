@@ -292,37 +292,44 @@ def apply_snapshot(con, settings_path, snapshot):
     for name in ("enabled_hermes", "enabled_grokbuild", "enabled_mcode"):
         ensure_column(con, "mcp_servers", name, "INTEGER NOT NULL DEFAULT 0")
     con.execute("PRAGMA foreign_keys=OFF")
-    for table in ("provider_endpoints", "provider_health", "providers", "prompts", "mcp_servers"):
-        if table_exists(con, table):
-            con.execute("DELETE FROM " + table)
-    insert_rows(con, "providers", snapshot.get("providers") or [])
-    insert_rows(con, "provider_endpoints", snapshot.get("endpoints") or [])
-    insert_rows(con, "prompts", snapshot.get("prompts") or [])
-    insert_rows(con, "mcp_servers", snapshot.get("mcpServers") or [])
-    common = snapshot.get("commonConfig") or {}
-    for key in COMMON_KEYS:
-        value = common.get(key)
-        if value is None:
-            con.execute("DELETE FROM settings WHERE key=?", (key,))
-        else:
-            con.execute("DELETE FROM settings WHERE key=?", (key,))
-            con.execute("INSERT INTO settings(key, value) VALUES(?, ?)", (key, value))
-    data = {}
-    if settings_path.exists():
-        try:
-            data = json.loads(settings_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    current = snapshot.get("current") or {}
-    for field, key in CURRENT_FIELDS:
-        value = current.get(field)
-        if value:
-            data[key] = value
-        else:
-            data.pop(key, None)
-    settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
-    os.chmod(settings_path, 0o600)
-    con.commit()
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        for table in ("provider_endpoints", "provider_health", "providers", "prompts", "mcp_servers"):
+            if table_exists(con, table):
+                con.execute("DELETE FROM " + table)
+        insert_rows(con, "providers", snapshot.get("providers") or [])
+        insert_rows(con, "provider_endpoints", snapshot.get("endpoints") or [])
+        insert_rows(con, "prompts", snapshot.get("prompts") or [])
+        insert_rows(con, "mcp_servers", snapshot.get("mcpServers") or [])
+        common = snapshot.get("commonConfig") or {}
+        for key in COMMON_KEYS:
+            value = common.get(key)
+            if value is None:
+                con.execute("DELETE FROM settings WHERE key=?", (key,))
+            else:
+                con.execute("DELETE FROM settings WHERE key=?", (key,))
+                con.execute("INSERT INTO settings(key, value) VALUES(?, ?)", (key, value))
+        data = {}
+        if settings_path.exists():
+            try:
+                data = json.loads(settings_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        current = snapshot.get("current") or {}
+        for field, key in CURRENT_FIELDS:
+            value = current.get(field)
+            if value:
+                data[key] = value
+            else:
+                data.pop(key, None)
+        settings_tmp = settings_path.with_name(settings_path.name + ".tmp")
+        settings_tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+        os.chmod(settings_tmp, 0o600)
+        con.commit()
+        settings_tmp.replace(settings_path)
+    except Exception:
+        con.rollback()
+        raise
 
 home = pathlib.Path.home() / ".cc-switch"
 db_path = home / "cc-switch.db"
@@ -344,9 +351,13 @@ if mode == "write" and payload_b64:
     target = fingerprint(snapshot)
     if before != target:
         if existed:
-            stamp = time.strftime("%Y%m%d_%H%M%S")
+            stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
             backup = db_path.with_name(db_path.name + ".bak_" + stamp)
             backup.write_bytes(db_path.read_bytes())
+            try:
+                os.chmod(backup, 0o600)
+            except OSError:
+                pass
         apply_snapshot(con, settings_path, snapshot)
         changed = True
 snap = read_snapshot(con, settings_path)
@@ -359,6 +370,12 @@ print("CODEX_CC_JSON:" + json.dumps({"changed": changed, "fingerprint": after, "
 }
 
 function sshPythonArgs(entry) {
+  if (!entry?.host || entry.host.startsWith("-") || /[\s\x00-\x1f]/.test(entry.host)) {
+    throw new Error(`远程主机名不合法: ${entry?.host ?? ""}`);
+  }
+  if (entry.user && (entry.user.startsWith("-") || /[\s\x00-\x1f]/.test(entry.user))) {
+    throw new Error(`远程用户名不合法: ${entry.user}`);
+  }
   const args = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12"];
   if (entry.port) args.push("-p", String(entry.port));
   if (entry.identityFile) {

@@ -1,6 +1,6 @@
 # AI 工具箱
 
-本地 AI 小工具集合。核心能力是在不重启 Codex 应用的前提下，热切换 cc-switch 管理的第三方模型供应商；此外还包含 Claude Desktop 跟随、cc-switch 远程同步、Grok Bot 本地网关、额度查询和网络测速。
+本地 AI 小工具集合。核心能力是在不重启 Codex 应用的前提下，热切换 cc-switch 管理的第三方模型供应商；此外还包含 Claude Desktop 跟随、cc-switch 远程同步、Today / Grok Bot 本地网关、额度查询和网络测速。
 
 ## 包含的工具
 
@@ -8,15 +8,20 @@
 | --- | --- |
 | Codex | 供应商热切换、自动跟随、远程同步 |
 | Claude Desktop | 跟随 cc-switch 的桌面供应商，切换后重新打开应用 |
-| Grok Bot | 读取本机登录态，在本机启动 OpenAI 兼容网关 |
-| 额度 | OpenCode Go / ClinePass 多密钥三窗口额度 |
+| cc-switch | 以本机为真源，实时同步远程整库 |
 | 智商测试 | 用统一题目横向比较各供应商模型 |
-| 网络 | 出口信息、延迟、上下行测速 |
+| OpenCode 额度 | OpenCode Go 多密钥三窗口额度，可把密钥写入本机应用 |
+| ClinePass 额度 | ClinePass 多密钥三窗口额度和余额 |
+| Grok Bot | 读取本机登录态，在本机启动 OpenAI 兼容网关 |
+| 网络测速 | 出口信息、延迟、上下行测速 |
+| Today | 独立模块：通过 CDP 使用 Today.app，导出 OpenAI 兼容网关 |
 
 - **桌面 App**：`AI 工具箱.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
 - **命令行版**：`ai-toolbox` CLI（适合脚本/终端用户）
 
 ![界面](docs/screenshot.png)
+
+> 截图来自旧版 6 页界面；当前侧栏已有 9 页，Today 等新页面尚未重新截图。
 
 ## 它解决什么问题
 
@@ -61,7 +66,7 @@ cp -R "dist/AI 工具箱.app" /Applications/
 
 ## 命令行版
 
-要求：macOS + Node.js ≥ 18 + cc-switch + Codex。无需 npm install（零依赖，只用系统自带的 `sqlite3`/`ps`）。
+要求：macOS 14+ + Node.js ≥ 22.5 + cc-switch + Codex。只有智商测试需要 `npm install`（`@mariozechner/pi-coding-agent`）；其余命令只用 Node 内置模块和系统自带的 `sqlite3`/`ps`/`ssh`。
 
 ```bash
 # 方式一：直接跑
@@ -77,6 +82,14 @@ ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换�
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
 ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
 ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
+ai-toolbox claude-list             # 列出 Claude Desktop 供应商
+ai-toolbox iq-list                 # 列出可用于智商测试的供应商
+ai-toolbox go-quota                # 查询 OpenCode Go 三窗口额度
+ai-toolbox cline-quota             # 查询 ClinePass 三窗口额度和余额
+ai-toolbox today-status            # Today.app 登录态、模型目录、本地网关状态
+ai-toolbox today-models            # 列出 Today 账号可用模型
+ai-toolbox today-chat "你好"        # 向 Today 发一条消息
+ai-toolbox today-serve             # 启动 Today 的 OpenAI 兼容网关
 ai-toolbox doctor                  # 环境自检
 ```
 
@@ -133,6 +146,39 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 
 另外：用 `CODEX_HOME` 指定其它配置目录时，本工具不会写入 cc-switch 状态。
 
+## 测试与构建
+
+```bash
+npm test                 # Node 单元 + CLI 集成测试（27 项）
+npm run typecheck        # swiftc -typecheck
+npm run build            # 构建 dist/AI 工具箱.app（macOS 14+）
+```
+
+> 本机网关安全：Grok Bot 和 Today 的 OpenAI 兼容网关默认要求
+> `Authorization: Bearer <token>`，token 分别保存在
+> `~/.ai-toolbox/grok-gateway-token`、`~/.ai-toolbox/today-gateway-token`（0600），
+> App 页面里可以直接复制。设置 `GROKBOT_ALLOW_ANONYMOUS=1` 才会关闭 Grok 鉴权。
+
+## Today 独立模块
+
+Today 页是一个完全独立的模块：它不碰 Codex 配置，只通过 CDP 在 Today.app 的页面上下文里调用 `api.todayai.cn`，再把模型导出成 OpenAI 兼容网关。
+
+前置条件：
+
+- Today.app 已安装并登录；
+- Today.app 带 `--remote-debugging-port=9222` 启动。App 里的「启动 Today（调试端口）」会退出并重开它；
+- 不需要把 Today 的账号密码或 token 填进本工具。
+
+```bash
+ai-toolbox today-status             # CDP、当前模型、网关
+ai-toolbox today-models             # DeepSeek / MiniMax / GLM 等
+ai-toolbox today-chat "用一句话介绍自己"
+ai-toolbox today-launch             # 以调试端口重启 Today.app
+ai-toolbox today-serve --port 8317  # OpenAI 兼容网关
+```
+
+网关默认要求 `Authorization: Bearer <token>`，token 自动生成在 `~/.ai-toolbox/today-gateway-token`（0600），App 的 Today 页可以直接复制 Base URL / API Key。模型切换是 Today 账号的全局设置，切换后 Today App 里的选择也会变；Agent 调用会进入 Today 的主聊天。
+
 ## 兼容性说明
 
 - **官方 OpenAI 供应商**（ChatGPT 登录态走 `auth.json`）：请用 cc-switch 界面切换，然后用 `reload`；
@@ -145,6 +191,8 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 打开「自动跟随」和「远程同步」后，在 cc-switch 里切换供应商，本机会热重启，并把供应商、模型、端点和密钥同步到已启用的远程机器，同时重启那些机器上当前 SSH 账号的 Codex app-server。
 
 机器在界面里添加，保存在本机 `~/.ai-toolbox/remotes.json`。登录走 `~/.ssh/config` 里的用户和密钥，不要把地址、账号或密码写进仓库。`src/remotes.json` 默认是空列表。
+
+> cc-switch 整库同步是“以本机为真源”的镜像：远端数据库里本机没有的供应商、prompts 会被清掉。写入前会自动备份远端 `cc-switch.db`（0600），失败会回滚。
 
 ```json
 {
@@ -159,7 +207,7 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 
 ## 数据目录
 
-本地状态统一放在 `~/.ai-toolbox/`（远程机器、测速历史、密钥、测试结果）。从旧名字升级时，首次启动会自动把 `~/.codex-hotswitch/` 整体搬过来，偏好设置也会迁移。
+本地状态统一放在 `~/.ai-toolbox/`（远程机器、测速历史、密钥、测试结果、Today/Grok 网关 token）。CLI 的 JSON 默认只给密钥尾号；只有 App 在需要复制时显式传 `--with-secrets`。从旧名字升级时，首次启动会自动把 `~/.codex-hotswitch/` 整体搬过来，偏好设置也会迁移。
 
 ## 目录结构
 
@@ -174,10 +222,13 @@ src/verify-client.mjs     一次性 app-server 校验
 src/reloader.mjs          app-server 发现 + 平滑重启
 src/watcher.mjs           watch 模式
 src/remote-sync.mjs       远程供应商同步
+src/today-gateway.mjs     Today 模块：状态、模型、对话、网关
+src/today/                vendored Today CDP 客户端与 OpenAI 兼容服务
 src/remotes.json          内置远程机器（默认空）
+test/                     Node 单元与集成测试
 docs/screenshot.png       界面演示图
 src/templates/            cc-switch 的模型目录模板（vendored）
-app/                      桌面 App（Swift / AppKit）
+app/                      桌面 App（Swift / AppKit，含 TodayPane）
 tools/make-icon.swift     图标生成
 build-app.sh              一键构建 .app
 dist/AI 工具箱.app         构建产物

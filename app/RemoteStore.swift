@@ -40,7 +40,11 @@ final class RemoteStore {
 
     func add(label: String, host: String, user: String?, port: Int?, identityFile: String?) throws {
         let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanHost.isEmpty, !cleanHost.contains(where: \.isWhitespace) else {
+        guard !cleanHost.isEmpty, !cleanHost.hasPrefix("-"), !cleanHost.contains(where: \.isWhitespace) else {
+            throw RemoteStoreError.invalidHost
+        }
+        let cleanUser = emptyToNil(user)
+        if let cleanUser, cleanUser.hasPrefix("-") || cleanUser.contains(where: \.isWhitespace) {
             throw RemoteStoreError.invalidHost
         }
         if machines.contains(where: { $0.host == cleanHost }) {
@@ -50,7 +54,7 @@ final class RemoteStore {
         machines.append(RemoteMachine(
             label: cleanLabel.isEmpty ? cleanHost : cleanLabel,
             host: cleanHost,
-            user: emptyToNil(user),
+            user: cleanUser,
             port: port,
             identityFile: emptyToNil(identityFile),
             builtin: false,
@@ -79,9 +83,15 @@ final class RemoteStore {
         }
         let payload: [String: Any] = ["disabled": disabled, "hosts": hosts]
         let url = Self.userFileURL
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let dir = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         }
     }
 

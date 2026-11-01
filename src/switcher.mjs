@@ -1,5 +1,5 @@
 // 切换供应商：生成配置 → 校验 → 原子写入 → 同步 cc-switch 状态。
-import { readFileSync, writeFileSync, existsSync, copyFileSync, renameSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, renameSync, chmodSync } from "node:fs";
 import path from "node:path";
 import {
   codexConfigPath,
@@ -8,7 +8,7 @@ import {
   CHATGPT_CODEX_BIN,
 } from "./paths.mjs";
 import { injectBearerToken, setCatalogJsonField } from "./toml-edit.mjs";
-import { mergeCommonConfig, isCommonConfigSubset, extractSections } from "./common-config.mjs";
+import { mergeCommonConfig, isCommonConfigSubset, extractSections, stripSections } from "./common-config.mjs";
 import { buildCatalog } from "./catalog.mjs";
 import { findCodexBinary, readEffectiveConfig } from "./verify-client.mjs";
 
@@ -17,7 +17,7 @@ const OFFICIAL_IDS = new Set(["codex-official"]);
 function timestamp() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}_${String(d.getMilliseconds()).padStart(3, "0")}`;
 }
 
 /** 写文件：同目录临时文件 + rename，保证原子性。 */
@@ -51,7 +51,7 @@ const APP_MANAGED_NAMESPACES = ["desktop", "marketplaces", "plugins", "projects"
  * 顺序与 cc-switch 一致：provider config → 通用配置合并 → bearer token → catalog 字段；
  * 另外用 live 配置补齐应用管理的 section。
  */
-export function buildProviderConfig({ provider, commonConfig, apiFormat, liveConfigText = null }) {
+export function buildProviderConfig({ provider, commonConfig, apiFormat, liveConfigText = null, dryRun = false }) {
   if (!provider.config.trim()) {
     throw new Error(
       `供应商「${provider.name}」没有可用的 config 配置（可能是官方供应商，请用 cc-switch 界面切换）。`,
@@ -63,13 +63,19 @@ export function buildProviderConfig({ provider, commonConfig, apiFormat, liveCon
   // 1. 通用配置片段：cc-switch 在切换时"只合并、不剥离"
   //    （剥离只发生在供应商编辑界面取消勾选/legacy 迁移时）
   if (commonConfig && providerUsesCommonConfig(provider, commonConfig)) {
-    text = mergeCommonConfig(text, commonConfig);
+    try {
+      text = mergeCommonConfig(text, commonConfig);
+    } catch (err) {
+      throw new Error(`通用配置合并失败: ${err.message}`);
+    }
   }
 
   // 2. 继承 live 配置里由应用管理的 section（desktop / marketplaces / plugins）
   if (liveConfigText) {
     const inherited = extractSections(liveConfigText, APP_MANAGED_NAMESPACES);
-    if (inherited) text = mergeCommonConfig(text, inherited);
+    // live 是应用自己维护的界面级配置：整体覆盖供应商存档里的旧快照，
+    // 而不是只增不删（用户在应用里删掉的键不应该被旧配置复活）。
+    if (inherited) text = mergeCommonConfig(stripSections(text, APP_MANAGED_NAMESPACES), inherited);
   }
 
   // 2. bearer token（来自 provider.auth.OPENAI_API_KEY）
@@ -87,7 +93,7 @@ export function buildProviderConfig({ provider, commonConfig, apiFormat, liveCon
     isOfficial: false,
   });
   if (catalog) {
-    writeAtomic(ccSwitchCatalogPath(), `${JSON.stringify(catalog, null, 2)}\n`);
+    if (!dryRun) writeAtomic(ccSwitchCatalogPath(), `${JSON.stringify(catalog, null, 2)}\n`);
     text = setCatalogJsonField(text, true);
   } else {
     text = setCatalogJsonField(text, false);
@@ -105,7 +111,13 @@ export async function switchProvider({ provider, commonConfig, apiFormat, log = 
   const warnings = [];
 
   const liveConfigText = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
-  const { text, catalog } = buildProviderConfig({ provider, commonConfig, apiFormat, liveConfigText });
+  const { text, catalog } = buildProviderConfig({
+    provider,
+    commonConfig,
+    apiFormat,
+    liveConfigText,
+    dryRun,
+  });
 
   log(`  目标供应商: ${provider.name} (${provider.id})`);
   if (catalog) log(`  模型目录: ${catalog.models.length} 个模型 (${catalog.models.map((m) => m.slug).join(", ")})`);
@@ -119,6 +131,7 @@ export async function switchProvider({ provider, commonConfig, apiFormat, log = 
   if (existsSync(configPath)) {
     backupPath = `${configPath}.bak_${timestamp()}`;
     copyFileSync(configPath, backupPath);
+    try { chmodSync(backupPath, 0o600); } catch { /* 忽略 */ }
     log(`  已备份原配置: ${backupPath}`);
   }
 

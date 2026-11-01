@@ -2,7 +2,7 @@
 // 只替换决定请求去向的字段（模型、model_provider、[model_providers.*] 和目录字段），
 // 远程自己的项目路径、桌面设置、notify、MCP 保持不动。
 // SSH 登录走本机 ~/.ssh/config（User + IdentityFile），不在这里保存密码。
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -45,16 +45,24 @@ function readJson(file) {
   }
 }
 
+function safeSshField(value) {
+  const text = String(value ?? "").trim();
+  // ssh 会把以 - 开头的目标当成选项；空白和控制字符也一律拒绝。
+  if (!text || text.startsWith("-") || /[\s\x00-\x1f]/.test(text)) return null;
+  return text;
+}
+
 export function normalizeHost(item, builtin = false) {
   if (typeof item === "string") {
-    const host = item.trim();
+    const host = safeSshField(item);
     return host ? { host, label: host, user: null, port: null, identityFile: null, builtin } : null;
   }
   if (!item || typeof item !== "object") return null;
-  const host = String(item.host ?? item.hostname ?? "").trim();
+  const host = safeSshField(item.host ?? item.hostname ?? "");
   if (!host) return null;
   const port = Number(item.port);
-  const user = item.user ? String(item.user).trim() : "";
+  const user = item.user ? safeSshField(item.user) : null;
+  if (item.user && !user) return null;
   const identityFile = item.identityFile ? String(item.identityFile).trim() : "";
   return {
     host,
@@ -139,7 +147,7 @@ function baseUrlOf(text) {
 }
 
 /** 只取出界面需要的供应商名、端点和密钥尾号，不返回完整密钥。 */
-export function providerSnapshot(text) {
+export function providerSnapshot(text, { includeSecrets = false } = {}) {
   const providerId = text.match(/^\s*model_provider\s*=\s*"([^"]+)"/m)?.[1] ?? null;
   let section = "";
   if (providerId) {
@@ -163,7 +171,7 @@ export function providerSnapshot(text) {
     baseUrl,
     host,
     tokenTail: token.length >= 12 ? token.slice(-8) : null,
-    token: token || null,
+    token: includeSecrets ? token || null : null,
   };
 }
 
@@ -284,8 +292,10 @@ async function readRemoteConfig(entry) {
     sshArgs(
       entry,
       [
-        "import base64, pathlib, sys",
-        "p = pathlib.Path.home() / '.codex' / 'config.toml'",
+        "import base64, os, pathlib, sys",
+        "env = os.environ.get('CODEX_HOME') or ''",
+        "home = pathlib.Path(env).expanduser() if env else pathlib.Path.home() / '.codex'",
+        "p = home / 'config.toml'",
         "data = p.read_bytes() if p.exists() else b''",
         "sys.stdout.write('CODEX_CFG_B64:' + base64.b64encode(data).decode() + '\\n')",
       ].join("\n"),
@@ -298,31 +308,33 @@ async function readRemoteConfig(entry) {
 }
 
 export function sshArgs(entry, program) {
+  const host = safeSshField(entry.host);
+  const user = entry.user ? safeSshField(entry.user) : null;
+  if (!host || (entry.user && !user)) {
+    throw new Error(`远程主机名不合法: ${entry.host}`);
+  }
   const payload = Buffer.from(program, "utf8").toString("base64");
   const args = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12"];
   if (entry.port) args.push("-p", String(entry.port));
   if (entry.identityFile) {
     args.push("-i", expandHome(entry.identityFile), "-o", "IdentitiesOnly=yes");
   }
-  const target = entry.user ? `${entry.user}@${entry.host}` : entry.host;
+  const target = user ? `${user}@${host}` : host;
   args.push(target, `python3 -c "import base64; exec(base64.b64decode('${payload}'))"`);
   return args;
 }
 
-function pyLiteral(value) {
-  if (value == null) return "None";
-  if (typeof value === "boolean") return value ? "True" : "False";
-  return JSON.stringify(value);
-}
 
-function remoteProgram({ configB64, catalogB64, catalogName, dryRun }) {
+function remoteProgram({ dryRun }) {
   return `
-import base64, json, os, pathlib, re, signal, subprocess, time
-cfg_bytes = base64.b64decode(${JSON.stringify(configB64)})
-catalog_b64 = ${pyLiteral(catalogB64)}
-catalog_name = ${pyLiteral(catalogName)}
+import base64, json, os, pathlib, re, signal, subprocess, sys, time
+payload = json.loads(sys.stdin.read() or "{}")
+cfg_bytes = base64.b64decode(payload.get("configB64") or "")
+catalog_b64 = payload.get("catalogB64")
+catalog_name = payload.get("catalogName")
 dry = ${dryRun ? "True" : "False"}
-home = pathlib.Path.home() / ".codex"
+codex_env = os.environ.get("CODEX_HOME") or ""
+home = pathlib.Path(codex_env).expanduser() if codex_env else pathlib.Path.home() / ".codex"
 cfg = home / "config.toml"
 previous = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
 new_text = cfg_bytes.decode("utf-8")
@@ -335,8 +347,13 @@ restarted = 0
 if changed and not dry:
     home.mkdir(parents=True, exist_ok=True)
     if cfg.exists():
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        cfg.with_name(cfg.name + ".bak_" + stamp).write_bytes(cfg.read_bytes())
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+        backup = cfg.with_name(cfg.name + ".bak_" + stamp)
+        backup.write_bytes(cfg.read_bytes())
+        try:
+            os.chmod(backup, 0o600)
+        except OSError:
+            pass
     tmp = cfg.with_name(cfg.name + ".tmp")
     tmp.write_text(new_text, encoding="utf-8")
     os.chmod(tmp, 0o600)
@@ -346,7 +363,7 @@ if changed and not dry:
         target = home / catalog_name
         target.write_bytes(data)
         os.chmod(target, 0o600)
-if not dry:
+if changed and not dry:
     me = os.environ.get("USER") or ""
     try:
         listing = subprocess.check_output(["ps", "-u", me, "-o", "pid=,args="], text=True)
@@ -390,24 +407,62 @@ print("CODEX_SYNC_JSON:" + json.dumps({"changed": changed, "restarted": restarte
 `;
 }
 
-async function pushHost(entry, content, catalog, dryRun) {
+function runRemote(entry, program, payload, timeoutMs = 25000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ssh", sshArgs(entry, program), { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGKILL");
+        reject(new Error(`SSH 超时（${Math.round(timeoutMs / 1000)}s）`));
+      }
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 4 * 1024 * 1024) stdout = stdout.slice(-4 * 1024 * 1024);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > 256 * 1024) stderr = stderr.slice(-256 * 1024);
+    });
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout, stderr });
+      else {
+        const err = new Error(stderr.trim() || `ssh exit ${code}`);
+        err.stderr = stderr;
+        reject(err);
+      }
+    });
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+async function pushHost(entry, content, catalog, dryRun, { includeSecrets = false } = {}) {
   const catalogB64 = catalog ? catalog.content.toString("base64") : null;
-  const program = remoteProgram({
+  const program = remoteProgram({ dryRun });
+  const payload = {
     configB64: Buffer.from(content, "utf8").toString("base64"),
     catalogB64,
     catalogName: catalog?.name ?? null,
-    dryRun,
-  });
+  };
   try {
-    const { stdout } = await execFileAsync("ssh", sshArgs(entry, program), {
-      encoding: "utf8",
-      timeout: 25000,
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    const { stdout } = await runRemote(entry, program, payload);
     const line = stdout.split("\n").map((item) => item.trim()).find((item) => item.startsWith("CODEX_SYNC_JSON:"));
     if (!line) throw new Error(stdout.trim().slice(-180) || "远程没有返回结果");
     const parsed = JSON.parse(line.slice("CODEX_SYNC_JSON:".length));
-    const snap = providerSnapshot(content);
+    const snap = providerSnapshot(content, { includeSecrets });
     return {
       host: entry.host,
       label: entry.label,
@@ -430,6 +485,7 @@ async function pushHost(entry, content, catalog, dryRun) {
 export async function syncRemotes({
   localText = null,
   dryRun = false,
+  includeSecrets = false,
   log = console.log,
 } = {}) {
   const hosts = loadRemotes();
@@ -454,7 +510,7 @@ export async function syncRemotes({
         return emptyHost(entry, detail.slice(0, 240));
       }
       const applied = applyProviderSlice(remoteText, text);
-      const snap = providerSnapshot(applied.text);
+      const snap = providerSnapshot(applied.text, { includeSecrets });
       if (dryRun) {
         log(
           applied.changed
@@ -475,11 +531,11 @@ export async function syncRemotes({
           error: null,
         };
       }
-      const pushed = await pushHost(entry, applied.text, catalog, false);
+      const pushed = await pushHost(entry, applied.text, catalog, false, { includeSecrets });
       if (!pushed.ok) {
         log(`  ❌ ${entry.label}: ${pushed.error}`);
       } else if (!pushed.changed) {
-        log(`  ✔ ${entry.label}: 已与本机一致 (${pushed.baseUrl ?? "-"})，已重启 ${pushed.restarted} 个 app-server`);
+        log(`  ✔ ${entry.label}: 已与本机一致 (${pushed.baseUrl ?? "-"})，未重启远程 app-server`);
       } else {
         log(
           `  ✔ ${entry.label}: ${pushed.previousBaseUrl ?? "-"} → ${pushed.baseUrl ?? "-"}，已重启 ${pushed.restarted} 个 app-server`,
@@ -492,13 +548,13 @@ export async function syncRemotes({
 }
 
 /** 只读取远程正在使用的供应商，返回名称、端点和密钥尾号。 */
-export async function inspectRemotes() {
+export async function inspectRemotes({ includeSecrets = false } = {}) {
   const hosts = loadRemotes();
   const results = await Promise.all(
     hosts.map(async (entry) => {
       try {
         const text = await readRemoteConfig(entry);
-        const snap = providerSnapshot(text);
+        const snap = providerSnapshot(text, { includeSecrets });
         return {
           host: entry.host,
           label: entry.label,

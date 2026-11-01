@@ -103,7 +103,7 @@ final class GrokBotPane: NSObject {
         chatBox.addRow(chatColumn)
 
         let body = NSStackView(views: [
-            SectionView(title: "本地网关", content: gatewayBox, footer: "启动后，OpenAI 兼容地址是 http://127.0.0.1:端口/v1。模型只有 grok-bot-default 和 grok-bot-automation。"),
+            SectionView(title: "本地网关", content: gatewayBox, footer: "启动后，OpenAI 兼容地址是 http://127.0.0.1:端口/v1；客户端需要带 Authorization: Bearer <网关 API Key>。模型只有 grok-bot-default 和 grok-bot-automation。"),
             gatewayStatus,
             SectionView(title: "本机登录", content: accountBox, footer: "密钥来自 Grok Bot 自己的钥匙串，完整显示，可以复制。"),
             SectionView(title: "助手", content: agentBox),
@@ -335,6 +335,9 @@ final class GrokBotPane: NSObject {
         }
         let base = statusInfo?.gateway?.baseUrl ?? backend.grokGatewayBaseURL
         rows.append(labeledSecret("网关地址", base, masked: false))
+        if let token = statusInfo?.gateway?.token, !token.isEmpty {
+            rows.append(labeledSecret("网关 API Key", token))
+        }
         if rows.isEmpty {
             rows.append(label("还没有读到 Grok Bot 登录。"))
         }

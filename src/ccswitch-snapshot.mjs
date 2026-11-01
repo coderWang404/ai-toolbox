@@ -161,7 +161,12 @@ export function readLocalSnapshot() {
   for (const [field] of CURRENT_FIELDS) current[field] = null;
   const settingsPath = ccSwitchSettingsPath();
   if (existsSync(settingsPath)) {
-    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    let settings = {};
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    } catch {
+      settings = {};
+    }
     for (const [field, key] of CURRENT_FIELDS) {
       current[field] = settings[key] == null || settings[key] === "" ? null : String(settings[key]);
     }

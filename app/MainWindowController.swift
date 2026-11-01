@@ -28,6 +28,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var grokController: GrokBotPane!
     private var speedPane: NSView!
     private var speedController: SpeedPane!
+    private var todayPane: NSView!
+    private var todayController: TodayPane!
     private let codexKeyHost = NSStackView()
     private let claudeKeyHost = NSStackView()
     private var iqProviderPopup: NSPopUpButton!
@@ -91,6 +93,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var busy = false
     private var pendingAutoReload = false
     private var pendingAutoReloadDone: (() -> Void)?
+    private var pendingAutoReloadScheduled = false
     private var onProvidersChanged: (([ProviderSummary], String?) -> Void)?
 
     private var defaults: UserDefaults { .standard }
@@ -174,7 +177,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         remoteSwitch.state = (defaults.object(forKey: "syncRemote") as? Bool ?? true) ? .on : .off
         let followGroup = GroupBox()
         followGroup.addRow(SettingRow(title: "自动跟随 cc-switch", subtitle: "cc-switch 里切换后自动热重启 Codex", accessory: watchSwitch))
-        followGroup.addRow(SettingRow(title: "远程同步", subtitle: "把本机供应商同步到已启用的机器", accessory: remoteSwitch))
 
         remoteRows = NSStackView()
         remoteRows.orientation = .vertical
@@ -456,6 +458,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         speedController = SpeedPane(backend: backend)
         speedController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 7, text) }
         speedPane = speedController.root
+        todayController = TodayPane(backend: backend)
+        todayController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 8, text) }
+        todayPane = todayController.root
 
         codexPane = wrapPage("Codex", "跟随 cc-switch 热切换 Codex 供应商", codexPane)
         claudePane = wrapPage("Claude Desktop", "跟随 cc-switch 的 Claude Desktop 供应商，切换后重新打开应用", claudePane)
@@ -466,7 +471,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let content = NSViewController()
         let host = NSView()
         host.wantsLayer = true
-        for pane in [codexPane!, claudePane!, ccPane!, iqPane!, quotaPane!, clinePane!, grokPane!, speedPane!] {
+        for pane in [codexPane!, claudePane!, ccPane!, iqPane!, quotaPane!, clinePane!, grokPane!, speedPane!, todayPane!] {
             pane.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(pane)
         NSLayoutConstraint.activate([
@@ -489,7 +494,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         split.splitView.setPosition(220, ofDividerAt: 0)
 
         let savedPage = defaults.integer(forKey: "mainPage")
-        showPage([1, 2, 3, 4, 5, 6, 7].contains(savedPage) ? savedPage : 0)
+        showPage([1, 2, 3, 4, 5, 6, 7, 8].contains(savedPage) ? savedPage : 0)
         if ccSyncEnabled() { startCcSwitchFollow() }
         startIqCatalogWatch()
     }
@@ -922,7 +927,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             NSApp.activate(ignoringOtherApps: true)
             let choice = alert.runModal()
             if choice == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/CC Switch.app"))
+                self.openCcSwitch()
                 setStatus("请在 cc-switch 里点击「\(provider.name)」，本 App 会自动热重启 Codex")
                 return
             }
@@ -1032,10 +1037,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     var parts = ["✔ 已切换到 \(provider.name)"]
                     if let model = result.effective?.model { parts.append("模型 \(model)") }
                     if let reload = result.reload {
-                        if (reload.killed ?? 0) > 0 {
-                            parts.append("已强制重启：在 ChatGPT 里点一次「Restart ChatGPT」")
-                        } else if reload.respawned != nil {
+                        if reload.respawned != nil {
                             parts.append("app-server 已自动重启，立即生效")
+                        } else if (reload.killed ?? 0) > 0 {
+                            parts.append("已强制重启：在 ChatGPT 里点一次「Restart ChatGPT」")
                         } else if (reload.terminated ?? 0) > 0 {
                             parts.append("点一下任意对话即生效，无需重启 Codex")
                         } else {
@@ -1100,6 +1105,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             // 第二次变化不能丢掉，否则 app-server 会停在旧配置上。
             pendingAutoReload = true
             if onDone != nil { pendingAutoReloadDone = onDone }
+            schedulePendingAutoReload()
             return
         }
         setBusy(true, status: "检测到配置变化，正在热重启 Codex…")
@@ -1173,7 +1179,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             NSApp.activate(ignoringOtherApps: true)
             let choice = alert.runModal()
             if choice == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/CC Switch.app"))
+                self.openCcSwitch()
                 setClaudeStatus("请在 cc-switch 里点击「\(provider.name)」，本 App 会重新打开 Claude Desktop")
                 return
             }
@@ -1689,13 +1695,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     func selectPage(_ index: Int) {
-        let page = [0, 1, 2, 3, 4, 5, 6, 7].contains(index) ? index : 0
+        let page = [0, 1, 2, 3, 4, 5, 6, 7, 8].contains(index) ? index : 0
         defaults.set(page, forKey: "mainPage")
         showPage(page)
     }
 
     private func showPage(_ index: Int) {
-        let pages = [codexPane, claudePane, ccPane, iqPane, quotaPane, clinePane, grokPane, speedPane]
+        let pages = [codexPane, claudePane, ccPane, iqPane, quotaPane, clinePane, grokPane, speedPane, todayPane]
         let visible = pane(for: index)
         for pane in pages {
             pane?.isHidden = pane !== visible
@@ -1710,6 +1716,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         if index == 5 { clineController?.onShow() }
         if index == 6 { grokController?.onShow() }
         if index == 7 { speedController?.onShow() } else { speedController?.onHide() }
+        if index == 8 { todayController?.onShow() }
         refreshSidebar()
     }
 
@@ -1722,6 +1729,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         case 5: return clinePane
         case 6: return grokPane
         case 7: return speedPane
+        case 8: return todayPane
         default: return codexPane
         }
     }
@@ -1744,6 +1752,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         sidebar?.setDetail(page: 5, clineController?.sidebarDetail() ?? "查询剩余额度")
         sidebar?.setDetail(page: 6, grokController?.sidebarDetail() ?? "本机网关")
         sidebar?.setDetail(page: 7, speedController?.sidebarDetail() ?? "未测速")
+        sidebar?.setDetail(page: 8, todayController?.sidebarDetail() ?? "独立网关")
     }
 
     private func iqSidebarDetail() -> String {
@@ -1752,14 +1761,16 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     private func claudeSidebarDetail() -> String {
-        if let provider = claudeProviders.first(where: { $0.id == claudeCurrentId }) {
+        let effectiveId = claudeLive?.liveProviderId ?? claudeCurrentId
+        if let provider = claudeProviders.first(where: { $0.id == effectiveId }) {
             return provider.host.map { "\(provider.name) · \($0)" } ?? provider.name
         }
         return "跟随 cc-switch"
     }
 
     private func codexSidebarDetail() -> String {
-        if let provider = providers.first(where: { $0.id == currentId }) {
+        let effectiveId = liveInfo?.liveProviderId ?? liveInfo?.matchedIds?.first ?? currentId
+        if let provider = providers.first(where: { $0.id == effectiveId }) {
             if let model = provider.model, !model.isEmpty { return "\(provider.name) · \(model)" }
             return provider.name
         }
@@ -1842,7 +1853,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         if ccSyncSwitch.state == .on {
             startCcSwitchFollow()
         }
-        tickCcSwitchFollow()
+        tickCcSwitchFollow(force: true)
     }
 
     private func ccSyncEnabled() -> Bool {
@@ -1907,8 +1918,12 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         ccSwitchBusy = false
     }
 
-    private func tickCcSwitchFollow() {
-        guard ccSyncEnabled(), !ccSwitchBusy else { return }
+    private func tickCcSwitchFollow(force: Bool = false) {
+        guard (force || ccSyncEnabled()), !ccSwitchBusy else { return }
+        guard remotes.machines.contains(where: \.enabled) else {
+            setCcStatus("没有启用的远程机器")
+            return
+        }
         let previous = ccSwitchHash
         let bootstrapped = ccSwitchBootstrapped
         let pending = ccSwitchPending
@@ -2012,10 +2027,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             guard let self else { return }
             let result = try? self.backend.remoteStatus()
             DispatchQueue.main.async {
-                guard let result else {
-                    self.setStatus("远程状态读取失败")
-                    return
-                }
+                guard let result else { return }
                 var next: [String: RemoteHostInfo] = [:]
                 for host in result.hosts {
                     next[host.host] = host
@@ -2029,7 +2041,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     private func applyRemoteLive(_ remote: RemoteSyncInfo?) {
         guard let remote else { return }
-        for host in remote.hosts where host.ok {
+        for host in remote.hosts {
             remoteLive[host.host] = host
         }
         rebuildRemoteRows()
@@ -2090,8 +2102,35 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [] }
 
+    private func openCcSwitch() {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.ccswitch.desktop") {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/CC Switch.app"))
+        }
+    }
+
     func setStatus(_ text: String) {
         statusLabel.set(text)
+    }
+
+    /// busy 可能来自切换/刷新/IQ 等任何操作；用定时器兜底，避免挂起的自动跟随永远不执行。
+    private func schedulePendingAutoReload() {
+        guard !pendingAutoReloadScheduled else { return }
+        pendingAutoReloadScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            self.pendingAutoReloadScheduled = false
+            guard self.pendingAutoReload else { return }
+            if self.busy {
+                self.schedulePendingAutoReload()
+                return
+            }
+            let done = self.pendingAutoReloadDone
+            self.pendingAutoReload = false
+            self.pendingAutoReloadDone = nil
+            self.autoReloadAfterChange(onDone: done)
+        }
     }
 
     private func finishAutoReload(onDone: (() -> Void)?) {
