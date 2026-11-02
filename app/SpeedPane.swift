@@ -6,6 +6,7 @@ private struct SpeedRecord: Codable {
     var down: Double
     var up: Double
     var ping: Double?
+    var method: String?
 }
 
 final class SpeedPane: NSObject {
@@ -35,6 +36,7 @@ final class SpeedPane: NSObject {
     private var lastBytesOut: Double?
     private var lastByteSample: Date?
     private var records: [SpeedRecord] = []
+    private var proxyDetected = false
 
     init(backend: Backend) {
         self.backend = backend
@@ -128,6 +130,8 @@ final class SpeedPane: NSObject {
             ("Wi-Fi", "ssid"), ("链路", "media"),
             ("公网 IP", "publicIP"), ("位置", "place"),
             ("出口节点", "colo"), ("协议", "protocol"),
+            ("测速方式", "method"), ("测速节点", "endpoint"),
+            ("代理检测", "proxy"), ("代理地址", "proxyAddress"),
             ("实时接收", "liveIn"), ("实时发送", "liveOut"),
             ("抖动", "jitter"), ("丢包", "loss"),
         ]
@@ -155,8 +159,8 @@ final class SpeedPane: NSObject {
             top,
             totalBox,
             SectionView(title: "这一次", content: sparkBox, footer: "线是这一段开始以来的平均速度，不是每一瞬间的跳动。"),
-            SectionView(title: "按时间累计", content: historyBox, footer: "只保留最近 48 次的结果。关掉窗口也不会丢。"),
-            SectionView(title: "线路", content: detailBox, footer: "下载和上传各约 8 秒。实时收发每 8 秒看一次网卡，测速时先暂停，免得跟测速抢。"),
+            SectionView(title: "按时间累计", content: historyBox, footer: "只保留最近 48 次 networkQuality 结果；旧版 Cloudflare 记录会隐藏。关掉窗口也不会丢。"),
+            SectionView(title: "线路", content: detailBox, footer: "测速由 macOS networkQuality 顺序完成，约 30 秒；检测到 Clash/TUN fake-IP 时会绕过 Cloudflare 代理路径。实时收发每 8 秒看一次网卡，测速时先暂停。"),
             status,
         ])
         body.orientation = .vertical
@@ -271,13 +275,25 @@ final class SpeedPane: NSObject {
             set("place", object["place"] as? String)
             set("colo", object["colo"] as? String)
             set("protocol", object["httpProtocol"] as? String)
+            self.proxyDetected = object["proxyDetected"] as? Bool ?? false
+            set("proxy", self.proxyDetected ? "Clash/TUN fake-IP" : "未检测到")
+            set("proxyAddress", object["proxyAddress"] as? String)
+            set("method", "macOS networkQuality")
+            if let note = object["proxyNote"] as? String, !note.isEmpty {
+                status.set("⚠️ \(note)")
+            }
+        case "warning":
+            status.set("⚠️ \(object["message"] as? String ?? "测速提示")")
         case "phase":
             let phase = object["phase"] as? String
             samples = []
             spark.setSamples([])
             if phase == "ping" {
-                gauge.caption = "延迟"
-                status.set("正在测延迟…")
+                gauge.caption = "测速"
+                set("jitter", "—")
+                set("loss", "—")
+                set("endpoint", "—")
+                status.set(proxyDetected ? "正在用 macOS networkQuality 测速（约 30 秒）…" : "正在测延迟…")
             } else if phase == "download" {
                 gauge.caption = "下载"
                 gauge.setSpeed(0)
@@ -317,12 +333,15 @@ final class SpeedPane: NSObject {
             let down = object["downloadMbps"] as? Double ?? 0
             let up = object["uploadMbps"] as? Double ?? 0
             let ping = object["pingMs"] as? Double
+            let method = object["method"] as? String ?? "networkQuality"
             downloadCard.set(Self.mbps(down), unit: "Mbps")
             uploadCard.set(Self.mbps(up), unit: "Mbps")
             if let ping { pingCard.set(Self.milliseconds(ping), unit: "ms") }
+            set("method", method == "networkQuality" ? "macOS networkQuality" : "Cloudflare（代理路径）")
+            if let endpoint = object["endpoint"] as? String { set("endpoint", endpoint) }
             gauge.caption = "完成"
             gauge.setSpeed(down)
-            remember(down: down, up: up, ping: ping)
+            remember(down: down, up: up, ping: ping, method: method)
             testing = false
             startButton.title = "再测一次"
             onDetail?(sidebarDetail())
@@ -353,6 +372,10 @@ final class SpeedPane: NSObject {
         set("place", info.place)
         set("colo", info.colo)
         set("protocol", info.httpProtocol)
+        self.proxyDetected = info.proxyDetected ?? false
+        set("proxy", self.proxyDetected ? "Clash/TUN fake-IP" : "未检测到")
+        set("proxyAddress", info.proxyAddress)
+        set("method", "macOS networkQuality")
     }
 
     private func noteRates(inn: Double?, out: Double?) {
@@ -371,8 +394,8 @@ final class SpeedPane: NSObject {
         lastByteSample = now
     }
 
-    private func remember(down: Double, up: Double, ping: Double?) {
-        records.append(SpeedRecord(at: Date().timeIntervalSince1970, down: down, up: up, ping: ping))
+    private func remember(down: Double, up: Double, ping: Double?, method: String) {
+        records.append(SpeedRecord(at: Date().timeIntervalSince1970, down: down, up: up, ping: ping, method: method))
         if records.count > 48 { records.removeFirst(records.count - 48) }
         Self.saveRecords(records)
         renderHistory()
@@ -432,7 +455,9 @@ final class SpeedPane: NSObject {
 
     private static func loadRecords() -> [SpeedRecord] {
         guard let data = try? Data(contentsOf: historyURL()) else { return [] }
-        return (try? JSONDecoder().decode([SpeedRecord].self, from: data)) ?? []
+        let decoded = (try? JSONDecoder().decode([SpeedRecord].self, from: data)) ?? []
+        // 旧版 Cloudflare 结果受 fake-IP/代理影响，没有 method 字段；不再混进新统计。
+        return decoded.filter { $0.method != nil }
     }
 
     private static func saveRecords(_ records: [SpeedRecord]) {
@@ -631,6 +656,7 @@ private final class SpeedSpark: NSView {
 
 private final class SpeedHistoryChart: NSView {
     private var records: [SpeedRecord] = []
+    private var proxyDetected = false
 
     func setRecords(_ values: [SpeedRecord]) {
         records = Array(values.suffix(24))

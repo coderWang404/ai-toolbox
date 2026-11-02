@@ -1,6 +1,12 @@
-// 本机网络信息和测速。测速走 Cloudflare 的公开测速接口，结果只在本机显示。
+// 本机网络信息和测速。
+//
+// 重要：speed.cloudflare.com 在 Clash/Surge 的 TUN/fake-IP 模式下会被解析到
+// 198.18.x.x，测速流量实际走代理，而不是物理线路；这时 Cloudflare 的数值会
+// 严重偏低，TCP 延迟也变成到本地代理的 1~2ms。默认改用 macOS 自带的
+// networkQuality（可绑定物理网卡），Cloudflare 只作为旧系统/失败时的兜底。
 import { execFile } from "node:child_process";
 import { connect } from "node:net";
+import { lookup } from "node:dns/promises";
 import { setDefaultResultOrder } from "node:dns";
 
 setDefaultResultOrder("ipv4first");
@@ -8,12 +14,31 @@ setDefaultResultOrder("ipv4first");
 const DOWN_BYTES = Number(process.env.NET_DOWN_BYTES || 40_000_000);
 const UP_BYTES = Number(process.env.NET_UP_BYTES || 12_000_000);
 const PHASE_MS = Number(process.env.NET_PHASE_MS || 8000);
+const NETWORK_QUALITY = "/usr/bin/networkQuality";
 
 function run(command, args, timeout = 4000) {
   return new Promise((resolve) => {
     execFile(command, args, { timeout, encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
       resolve(typeof stdout === "string" ? stdout : "");
     });
+  });
+}
+
+function runCapture(command, args, timeout = 60000) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      args,
+      { timeout, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (error) {
+          error.stderr = stderr;
+          reject(error);
+          return;
+        }
+        resolve({ stdout: stdout ?? "", stderr: stderr ?? "" });
+      },
+    );
   });
 }
 
@@ -61,6 +86,28 @@ function dnsOf(text) {
   return servers.slice(0, 3);
 }
 
+/** fake-IP 段（Clash/Surge 常用 198.18.0.0/15），命中说明 DNS 被代理接管。 */
+export function isFakeIP(address) {
+  if (!address) return false;
+  const parts = String(address).split(".").map(Number);
+  return parts.length === 4 && parts[0] === 198 && (parts[1] === 18 || parts[1] === 19);
+}
+
+async function proxyDetection() {
+  const result = { detected: false, address: null, note: null };
+  try {
+    const found = await lookup("speed.cloudflare.com", { family: 4 });
+    result.address = found.address;
+    if (isFakeIP(found.address)) {
+      result.detected = true;
+      result.note = `speed.cloudflare.com 解析到 fake-IP ${found.address}，Cloudflare 测速会走代理；已改用 macOS networkQuality`;
+    }
+  } catch {
+    /* DNS 失败时继续 */
+  }
+  return result;
+}
+
 export async function networkInfo() {
   const route = await run("route", ["-n", "get", "default"]);
   const interfaceName = pick(route, /interface:\s*(\S+)/);
@@ -79,6 +126,7 @@ export async function networkInfo() {
   const dns = dnsOf(await run("scutil", ["--dns"]));
   const counters = interfaceName ? countersOf(await run("netstat", ["-I", interfaceName, "-b"])) : { bytesIn: null, bytesOut: null };
   const trace = await traceInfo();
+  const proxy = await proxyDetection();
   const status = pick(ifaceText, /status:\s*(\S+)/);
   const link = [media, status].filter(Boolean).join(" · ") || null;
   return {
@@ -100,6 +148,10 @@ export async function networkInfo() {
     isp: null,
     asn: null,
     httpProtocol: trace.protocol,
+    proxyDetected: proxy.detected,
+    proxyAddress: proxy.address,
+    proxyNote: proxy.note,
+    speedMethod: "networkQuality",
   };
 }
 
@@ -133,6 +185,83 @@ async function traceInfo() {
 
 function emitLine(emit, event) {
   emit(event);
+}
+
+/** 解析 macOS networkQuality -s -c 的 JSON。 */
+export function parseNetworkQuality(raw) {
+  let text = String(raw ?? "").trim();
+  if (!text.startsWith("{")) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) text = text.slice(start, end + 1);
+  }
+  const data = JSON.parse(text);
+  const downloadMbps = Number(data.dl_throughput) / 1e6;
+  const uploadMbps = Number(data.ul_throughput) / 1e6;
+  const pingMs = Number(data.base_rtt);
+  if (!Number.isFinite(downloadMbps) || !Number.isFinite(uploadMbps)) {
+    throw new Error("networkQuality 没有返回吞吐量");
+  }
+  const samples = Array.isArray(data.il_h2_req_resp)
+    ? data.il_h2_req_resp.map(Number).filter(Number.isFinite)
+    : [];
+  let jitterMs = null;
+  if (samples.length > 1) {
+    let total = 0;
+    for (let i = 1; i < samples.length; i += 1) total += Math.abs(samples[i] - samples[i - 1]);
+    jitterMs = total / (samples.length - 1);
+  }
+  return {
+    downloadMbps,
+    uploadMbps,
+    pingMs: Number.isFinite(pingMs) ? pingMs : null,
+    jitterMs,
+    loss: null,
+    dlBytes: Number(data.dl_bytes_transferred) || 0,
+    ulBytes: Number(data.ul_bytes_transferred) || 0,
+    endpoint: data.test_endpoint ?? null,
+    interfaceName: data.interface_name ?? null,
+    downloadDuration: Number(data.dl_phase_duration) || null,
+    uploadDuration: Number(data.ul_phase_duration) || null,
+    raw: data,
+  };
+}
+
+async function runNetworkQuality(interfaceName) {
+  const base = ["-s", "-c"];
+  const bounded = interfaceName && /^(en|wl|utun|ppp)\d+/.test(interfaceName);
+  const args = bounded ? [...base, "-I", interfaceName] : base;
+  try {
+    return await runCapture(NETWORK_QUALITY, args, 75000);
+  } catch (error) {
+    // -I 在某些网卡/权限下不可用，退回系统自己选路；超时则不要重试。
+    if (bounded && !error.killed) return runCapture(NETWORK_QUALITY, base, 75000);
+    throw error;
+  }
+}
+
+async function measureWithNetworkQuality(interfaceName, emit) {
+  emitLine(emit, { type: "phase", phase: "ping" });
+  const { stdout } = await runNetworkQuality(interfaceName);
+  const result = parseNetworkQuality(stdout);
+  emitLine(emit, { type: "latency", pingMs: result.pingMs, jitterMs: result.jitterMs, loss: result.loss });
+  emitLine(emit, { type: "phase", phase: "download" });
+  emitLine(emit, {
+    type: "sample",
+    phase: "download",
+    mbps: result.downloadMbps,
+    averageMbps: result.downloadMbps,
+    bytes: result.dlBytes,
+  });
+  emitLine(emit, { type: "phase", phase: "upload" });
+  emitLine(emit, {
+    type: "sample",
+    phase: "upload",
+    mbps: result.uploadMbps,
+    averageMbps: result.uploadMbps,
+    bytes: result.ulBytes,
+  });
+  return result;
 }
 
 function tcpPing(host, port) {
@@ -238,24 +367,45 @@ async function measureUpload(emit) {
   return (sent * 8) / (elapsed / 1000) / 1e6;
 }
 
+async function cloudflareFallback(emit) {
+  emitLine(emit, { type: "phase", phase: "ping" });
+  const latency = await measurePing(emit);
+  emitLine(emit, { type: "latency", ...latency });
+  emitLine(emit, { type: "phase", phase: "download" });
+  const downloadMbps = await measureDownload(emit);
+  emitLine(emit, { type: "phase", phase: "upload" });
+  const uploadMbps = await measureUpload(emit);
+  return { downloadMbps, uploadMbps, pingMs: latency.pingMs, jitterMs: latency.jitterMs, loss: latency.loss, method: "cloudflare" };
+}
+
 export async function runSpeedTest(emit) {
   try {
     const info = await networkInfo();
     emitLine(emit, { type: "info", ...info });
-    emitLine(emit, { type: "phase", phase: "ping" });
-    const latency = await measurePing(emit);
-    emitLine(emit, { type: "latency", ...latency });
-    emitLine(emit, { type: "phase", phase: "download" });
-    const downloadMbps = await measureDownload(emit);
-    emitLine(emit, { type: "phase", phase: "upload" });
-    const uploadMbps = await measureUpload(emit);
+
+    let result;
+    try {
+      result = await measureWithNetworkQuality(info.interfaceName, emit);
+      result.method = "networkQuality";
+    } catch (error) {
+      const reason = String(error?.message ?? error);
+      if (error?.killed || /ETIMEDOUT|timed out/i.test(reason)) throw error;
+      if (!/ENOENT|not found/i.test(reason)) {
+        emitLine(emit, { type: "warning", message: `networkQuality 失败，回退 Cloudflare：${reason}` });
+      }
+      result = await cloudflareFallback(emit);
+    }
+
     emitLine(emit, {
       type: "done",
-      downloadMbps,
-      uploadMbps,
-      pingMs: latency.pingMs,
-      jitterMs: latency.jitterMs,
-      loss: latency.loss,
+      downloadMbps: result.downloadMbps,
+      uploadMbps: result.uploadMbps,
+      pingMs: result.pingMs,
+      jitterMs: result.jitterMs,
+      loss: result.loss,
+      method: result.method,
+      endpoint: result.endpoint ?? null,
+      proxyDetected: info.proxyDetected,
     });
   } catch (error) {
     const raw = String(error?.message ?? error);

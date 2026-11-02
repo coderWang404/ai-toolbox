@@ -416,6 +416,10 @@ struct NetInfo: Codable {
     let isp: String?
     let asn: Int?
     let httpProtocol: String?
+    let proxyDetected: Bool?
+    let proxyAddress: String?
+    let proxyNote: String?
+    let speedMethod: String?
     let error: String?
 }
 

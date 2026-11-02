@@ -149,7 +149,7 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 ## 测试与构建
 
 ```bash
-npm test                 # Node 单元 + CLI 集成测试（27 项）
+npm test                 # Node 单元 + CLI 集成测试（29 项）
 npm run typecheck        # swiftc -typecheck
 npm run build            # 构建 dist/AI 工具箱.app（macOS 14+）
 ```
@@ -178,6 +178,14 @@ ai-toolbox today-serve --port 8317  # OpenAI 兼容网关
 ```
 
 网关默认要求 `Authorization: Bearer <token>`，token 自动生成在 `~/.ai-toolbox/today-gateway-token`（0600），App 的 Today 页可以直接复制 Base URL / API Key。模型切换是 Today 账号的全局设置，切换后 Today App 里的选择也会变；Agent 调用会进入 Today 的主聊天。
+
+## 网络测速
+
+默认调用 macOS 自带的 `/usr/bin/networkQuality -s -c`，并把测试绑定到当前物理网卡。
+这样即使 Clash/Surge 的 TUN/fake-IP 把 `speed.cloudflare.com` 解析成 `198.18.x.x`，
+测的也是物理线路，而不是代理出口（页面会显示“代理检测”和测速节点）。
+旧版 Cloudflare 路径只作为 `networkQuality` 不可用时的兜底；旧版测速记录会自动隐藏。
+一次测速约 30 秒。
 
 ## 兼容性说明
 
