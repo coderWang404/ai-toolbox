@@ -158,7 +158,7 @@ final class SpeedPane: NSObject {
         let body = NSStackView(views: [
             top,
             totalBox,
-            SectionView(title: "这一次", content: sparkBox, footer: "线是这一段开始以来的平均速度，不是每一瞬间的跳动。"),
+            SectionView(title: "这一次", content: sparkBox, footer: "线是网卡实时采样，表盘跟瞬时速度；下载/上传卡片显示本阶段均速。"),
             SectionView(title: "按时间累计", content: historyBox, footer: "只保留最近 48 次 networkQuality 结果；旧版 Cloudflare 记录会隐藏。关掉窗口也不会丢。"),
             SectionView(title: "线路", content: detailBox, footer: "测速由 macOS networkQuality 顺序完成，约 30 秒；检测到 Clash/TUN fake-IP 时会绕过 Cloudflare 代理路径。实时收发每 8 秒看一次网卡，测速时先暂停。"),
             status,
@@ -314,9 +314,11 @@ final class SpeedPane: NSObject {
             if let jitter = object["jitterMs"] as? Double { set("jitter", "\(Self.milliseconds(jitter)) ms") }
             if let loss = object["loss"] as? Double { set("loss", "\(Int((loss * 100).rounded()))%") }
         case "sample":
-            let average = object["averageMbps"] as? Double ?? object["mbps"] as? Double ?? 0
-            gauge.setSpeed(average)
-            samples.append(CGFloat(average))
+            let instant = object["mbps"] as? Double ?? object["averageMbps"] as? Double ?? 0
+            let average = object["averageMbps"] as? Double ?? instant
+            // 表盘跟瞬时速率走，卡片仍显示本阶段均速；最终 done 再覆盖成准确结果。
+            gauge.setSpeed(instant)
+            samples.append(CGFloat(instant))
             if samples.count > 36 { samples.removeFirst(samples.count - 36) }
             spark.setSamples(samples)
             let text = Self.mbps(average)

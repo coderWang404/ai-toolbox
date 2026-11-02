@@ -240,27 +240,143 @@ async function runNetworkQuality(interfaceName) {
   }
 }
 
+/**
+ * 在 networkQuality 跑的时候轮询网卡计数，把真实的收发速率喂给表盘。
+ * networkQuality 本身不输出进度，但它的流量确实经过物理网卡；这样动画是真实数据，
+ * 最终结果仍以 networkQuality 的 JSON 为准。
+ */
+function startInterfaceMonitor(interfaceName, emit, { intervalMs = 350 } = {}) {
+  if (!interfaceName) return { stop() {}, sawPhase: false };
+  let stopped = false;
+  let timer = null;
+  let last = null;
+  let lastAt = 0;
+  let phase = null;
+  let phaseStartAt = 0;
+  let phaseStartRx = 0;
+  let phaseStartTx = 0;
+  let rxTotal = 0;
+  let txTotal = 0;
+  let sawPhase = false;
+  let candidatePhase = null;
+  let candidateCount = 0;
+
+  const schedule = () => {
+    if (!stopped) timer = setTimeout(poll, intervalMs);
+  };
+
+  const poll = async () => {
+    if (stopped) return;
+    const text = await run("netstat", ["-I", interfaceName, "-b"], 2500);
+    if (stopped) return;
+    const counters = countersOf(text);
+    const now = performance.now();
+    if (counters.bytesIn == null || counters.bytesOut == null) {
+      schedule();
+      return;
+    }
+    if (!last) {
+      last = counters;
+      lastAt = now;
+      schedule();
+      return;
+    }
+    const dt = (now - lastAt) / 1000;
+    if (dt <= 0) {
+      schedule();
+      return;
+    }
+    const dRx = Math.max(0, counters.bytesIn - last.bytesIn);
+    const dTx = Math.max(0, counters.bytesOut - last.bytesOut);
+    rxTotal += dRx;
+    txTotal += dTx;
+    const rxMbps = (dRx * 8) / dt / 1e6;
+    const txMbps = (dTx * 8) / dt / 1e6;
+
+    let nextPhase = null;
+    if (rxMbps > Math.max(5, txMbps * 1.5)) nextPhase = "download";
+    else if (txMbps > Math.max(5, rxMbps * 1.5)) nextPhase = "upload";
+
+    // 握手/keepalive 也会产生短暂的单向流量；要求连续两次同向才切换阶段。
+    if (nextPhase !== phase) {
+      if (nextPhase === candidatePhase) candidateCount += 1;
+      else {
+        candidatePhase = nextPhase;
+        candidateCount = 1;
+      }
+      if (nextPhase && candidateCount >= 2) {
+        phase = nextPhase;
+        phaseStartAt = now;
+        phaseStartRx = rxTotal;
+        phaseStartTx = txTotal;
+        sawPhase = true;
+        emitLine(emit, { type: "phase", phase });
+        candidatePhase = null;
+        candidateCount = 0;
+      }
+    } else {
+      candidatePhase = null;
+      candidateCount = 0;
+    }
+    if (phase) {
+      const elapsed = Math.max((now - phaseStartAt) / 1000, 0.05);
+      const bytes = phase === "download" ? rxTotal - phaseStartRx : txTotal - phaseStartTx;
+      if (bytes > 0) {
+        emitLine(emit, {
+          type: "sample",
+          phase,
+          mbps: phase === "download" ? rxMbps : txMbps,
+          averageMbps: (bytes * 8) / elapsed / 1e6,
+          bytes,
+        });
+      }
+    }
+    last = counters;
+    lastAt = now;
+    schedule();
+  };
+
+  timer = setTimeout(poll, 300);
+  return {
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    },
+    get sawPhase() {
+      return sawPhase;
+    },
+  };
+}
+
 async function measureWithNetworkQuality(interfaceName, emit) {
   emitLine(emit, { type: "phase", phase: "ping" });
-  const { stdout } = await runNetworkQuality(interfaceName);
+  const monitor = startInterfaceMonitor(interfaceName, emit);
+  let stdout;
+  try {
+    ({ stdout } = await runNetworkQuality(interfaceName));
+  } finally {
+    monitor.stop();
+  }
   const result = parseNetworkQuality(stdout);
   emitLine(emit, { type: "latency", pingMs: result.pingMs, jitterMs: result.jitterMs, loss: result.loss });
-  emitLine(emit, { type: "phase", phase: "download" });
-  emitLine(emit, {
-    type: "sample",
-    phase: "download",
-    mbps: result.downloadMbps,
-    averageMbps: result.downloadMbps,
-    bytes: result.dlBytes,
-  });
-  emitLine(emit, { type: "phase", phase: "upload" });
-  emitLine(emit, {
-    type: "sample",
-    phase: "upload",
-    mbps: result.uploadMbps,
-    averageMbps: result.uploadMbps,
-    bytes: result.ulBytes,
-  });
+  if (!monitor.sawPhase) {
+    emitLine(emit, { type: "phase", phase: "download" });
+    emitLine(emit, {
+      type: "sample",
+      phase: "download",
+      mbps: result.downloadMbps,
+      averageMbps: result.downloadMbps,
+      bytes: result.dlBytes,
+    });
+    emitLine(emit, { type: "phase", phase: "upload" });
+    emitLine(emit, {
+      type: "sample",
+      phase: "upload",
+      mbps: result.uploadMbps,
+      averageMbps: result.uploadMbps,
+      bytes: result.ulBytes,
+    });
+  }
   return result;
 }
 
