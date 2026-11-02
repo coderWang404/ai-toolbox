@@ -46,6 +46,8 @@ import {
   clearQoderCaches,
   restartQoder,
   openQoder,
+  qoderRemoteStatus,
+  qoderRemoteAction,
 } from "../src/qoder-network.mjs";
 import {
   todayStatus,
@@ -94,6 +96,8 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox qoder-restore         还原 Qoder 网络修复
   ai-toolbox qoder-restart         重启 Qoder CN
   ai-toolbox qoder-open            打开 Qoder CN
+  ai-toolbox qoder-remote-status   查看远程机器上的 Qoder 状态
+  ai-toolbox qoder-remote-action --host <别名> --action <动作>  重启远程 watcher/代理/worker 或重新包装
   ai-toolbox qoder-httpdns <on|off> 开启/关闭 Qoder HTTPDNS
   ai-toolbox today-status          Today.app 登录态、模型目录与本地网关状态
   ai-toolbox today-models          列出 Today 账号可用的模型
@@ -641,6 +645,25 @@ async function cmdQoderStatus(opts) {
   return status;
 }
 
+async function cmdQoderRemoteStatus(opts) {
+  const result = await qoderRemoteStatus();
+  if (!opts.json) {
+    opts.log(`\n远程 Qoder（${result.configured ? result.file : "未配置"}）`);
+    for (const host of result.hosts ?? []) {
+      opts.log(`  ${host.label ?? host.host} [${host.health}] ${host.hostname ?? "-"} 安装 ${host.installs ?? 0} · 包装 ${host.wrapped ?? 0} · watcher ${host.watcher ?? "-"}`);
+      opts.log(`    direct ${host.endpointDirectCode ?? 0} ${host.endpointDirectTimeMs ?? 0}ms · proxy ${host.endpointProxyCode ?? 0} ${host.endpointProxyTimeMs ?? 0}ms${host.issues?.length ? ` · ${host.issues.join("；")}` : ""}`);
+    }
+  }
+  return result;
+}
+
+async function cmdQoderRemoteAction(opts) {
+  if (!opts.host || !opts.action) throw new Error("用法: ai-toolbox qoder-remote-action --host <别名> --action <restart-watcher|restart-proxy|restart-worker|wrap|enable-watcher>");
+  const result = await qoderRemoteAction(opts.host, opts.action);
+  if (!opts.json) opts.log(`${result.ok ? "完成" : "失败"}: ${result.output ?? result.error ?? ""}`);
+  return result;
+}
+
 async function cmdQoderFix(opts) {
   const result = await applyQoderFix({ restart: true });
   if (!opts.json && result.status) await cmdQoderStatus(opts);
@@ -855,6 +878,8 @@ async function main() {
       thinking: { type: "string" },
       topic: { type: "string" },
       port: { type: "string" },
+      host: { type: "string" },
+      action: { type: "string" },
     },
   });
 
@@ -878,6 +903,8 @@ async function main() {
     thinking: values.thinking,
     topic: values.topic,
     port: values.port ? Number(values.port) : null,
+    host: values.host,
+    action: values.action,
   };
 
   const [command, arg] = positionals;
@@ -1030,6 +1057,12 @@ async function main() {
       break;
     case "qoder-httpdns":
       result = await cmdQoderHttpdns(arg, opts);
+      break;
+    case "qoder-remote-status":
+      result = await cmdQoderRemoteStatus(opts);
+      break;
+    case "qoder-remote-action":
+      result = await cmdQoderRemoteAction(opts);
       break;
     case "today-status":
       result = await cmdTodayStatus(opts);

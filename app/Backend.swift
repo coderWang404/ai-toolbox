@@ -719,6 +719,17 @@ final class Backend {
         try decode(QoderActionResult.self, from: run(["qoder-open"], timeout: 20))
     }
 
+    func qoderRemoteStatus() throws -> QoderRemoteReport {
+        try decode(QoderRemoteReport.self, from: run(["qoder-remote-status"], timeout: 60))
+    }
+
+    func qoderRemoteAction(host: String, action: String) throws -> QoderRemoteActionReport {
+        try decode(QoderRemoteActionReport.self, from: run(
+            ["qoder-remote-action", "--host", host, "--action", action],
+            timeout: 90
+        ))
+    }
+
     func grokStatus() throws -> GrokStatus {
         try decode(GrokStatus.self, from: run(["grok-status"], timeout: 30, withSecrets: true))
     }

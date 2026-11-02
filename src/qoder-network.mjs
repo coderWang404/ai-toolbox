@@ -1,6 +1,6 @@
 // Qoder CN 网络状态与管理：DNS/hosts、Clash TUN/fake-IP、HTTPDNS、Qoder 日志和入口探测。
 // 只读写本机 Qoder 相关配置；写 /etc/hosts 时通过 osascript 弹出系统管理员授权。
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   existsSync,
   readFileSync,
@@ -753,3 +753,292 @@ export {
   hostsWithBlock,
   parseProfiles,
 };
+
+// ---------- 远程 Qoder（通过 ~/.ssh/config 的别名） ----------
+
+export function qoderRemotesPath() {
+  return process.env.AI_TOOLBOX_QODER_REMOTES?.trim() || path.join(dataDir(), "qoder-remotes.json");
+}
+
+function safeHost(host) {
+  const text = String(host ?? "").trim();
+  return text && !text.startsWith("-") && !/[\s\x00-\x1f]/.test(text) ? text : null;
+}
+
+export function loadQoderRemotes() {
+  const file = qoderRemotesPath();
+  if (!existsSync(file)) return { hosts: [], configured: false, file };
+  try {
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    const hosts = (Array.isArray(data?.hosts) ? data.hosts : [])
+      .map((item) => {
+        if (typeof item === "string") return { host: safeHost(item), label: item, proxy: null, role: null };
+        return {
+          host: safeHost(item?.host),
+          label: String(item?.label ?? item?.host ?? "").trim() || safeHost(item?.host) || "",
+          proxy: typeof item?.proxy === "string" && item.proxy.trim() ? item.proxy.trim() : null,
+          role: typeof item?.role === "string" ? item.role.trim() : null,
+          enabled: item?.enabled !== false,
+        };
+      })
+      .filter((item) => item.host && item.enabled !== false);
+    return { hosts, configured: true, file };
+  } catch {
+    return { hosts: [], configured: false, file };
+  }
+}
+
+export function remoteProbeScript(proxy = null, role = null) {
+  const proxyUrl = role === "proxy" ? "http://127.0.0.1:18443" : (proxy || "");
+  // URL 只允许 http(s)://host:port，避免把配置注入 shell。
+  let safeProxy = "";
+  if (proxyUrl) {
+    try {
+      const parsed = new URL(proxyUrl);
+      if ((parsed.protocol === "http:" || parsed.protocol === "https:") && /^[A-Za-z0-9.:-]+$/.test(parsed.host)) {
+        safeProxy = proxyUrl.replace(/'/g, "");
+      }
+    } catch { safeProxy = ""; }
+  }
+  return `
+set -u
+hostname_value=$(hostname 2>/dev/null || echo "?")
+user_value=$(id -un 2>/dev/null || echo "?")
+home_value=$HOME
+hosts_count=$(grep -c '8\\.153\\.206\\.47[[:space:]]\\+.*qoder' /etc/hosts 2>/dev/null || true)
+[ -z "$hosts_count" ] && hosts_count=0
+env_value=$(grep -h '^QODERCN_HTTPDNS=' /etc/environment "$HOME/.profile" "$HOME/.bashrc" 2>/dev/null | tail -1 || true)
+installs=$(find "$HOME/.qoder-cn/remote/protocol-v1/installs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+wrapped=$(find "$HOME/.qoder-cn/remote/protocol-v1/installs" -path '*/bin/node' -type f -exec grep -l 'QODERCN_HTTPDNS=false' {} \\; 2>/dev/null | wc -l | tr -d ' ')
+wrapper_proxy=$(find "$HOME/.qoder-cn/remote/protocol-v1/installs" -path '*/bin/node' -type f -exec grep -h '^export HTTPS_PROXY=' {} \\; 2>/dev/null | head -1 || true)
+wrapper_env=$(find "$HOME/.qoder-cn/remote/protocol-v1/installs" -path '*/bin/node' -type f -exec grep -h '^export QODERCN_HTTPDNS=' {} \\; 2>/dev/null | head -1 || true)
+watcher=$(systemctl --user is-active qoder-wrap-watch 2>/dev/null || true)
+[ -z "$watcher" ] && watcher=inactive
+proxy_service=$(systemctl --user is-active qoder-proxy 2>/dev/null || true)
+[ -z "$proxy_service" ] && proxy_service=inactive
+proxy_port=$(ss -ltn 2>/dev/null | grep -c ':18443' || true)
+runtime=$(pgrep -f '[q]oder-worker-runtime|[r]untime-host.cjs' 2>/dev/null | wc -l | tr -d ' ')
+endpoint_direct_file=$(mktemp)
+endpoint_proxy_file=$(mktemp)
+( curl -sS -m 5 -o /dev/null -w '%{http_code}|%{time_total}' --noproxy '*' https://openapi.qoder.com.cn/algo/api/v1/ping >"$endpoint_direct_file" 2>/dev/null || true ) &
+direct_pid=$!
+proxy_url='${safeProxy}'
+(
+  if [ -n "$proxy_url" ]; then
+    curl -sS -m 5 -o /dev/null -w '%{http_code}|%{time_total}' -x "$proxy_url" https://openapi.qoder.com.cn/algo/api/v1/ping >"$endpoint_proxy_file" 2>/dev/null || true
+  else
+    printf '000|0' >"$endpoint_proxy_file"
+  fi
+) &
+proxy_pid=$!
+wait "$direct_pid" "$proxy_pid" 2>/dev/null || true
+endpoint_direct=$(cat "$endpoint_direct_file" 2>/dev/null || printf '000|0')
+endpoint_proxy=$(cat "$endpoint_proxy_file" 2>/dev/null || printf '000|0')
+[ -z "$endpoint_direct" ] && endpoint_direct='000|0'
+[ -z "$endpoint_proxy" ] && endpoint_proxy='000|0'
+rm -f "$endpoint_direct_file" "$endpoint_proxy_file"
+printf 'HOSTNAME=%s\\n' "$hostname_value"
+printf 'USER=%s\\n' "$user_value"
+printf 'HOME=%s\\n' "$home_value"
+printf 'HOSTS_COUNT=%s\\n' "$hosts_count"
+printf 'ENV=%s\\n' "$env_value"
+printf 'INSTALLS=%s\\n' "$installs"
+printf 'WRAPPED=%s\\n' "$wrapped"
+printf 'WRAPPER_PROXY=%s\\n' "$wrapper_proxy"
+printf 'WRAPPER_ENV=%s\\n' "$wrapper_env"
+printf 'WATCHER=%s\\n' "$watcher"
+printf 'PROXY_SERVICE=%s\\n' "$proxy_service"
+printf 'PROXY_PORT=%s\\n' "$proxy_port"
+printf 'RUNTIME=%s\\n' "$runtime"
+printf 'ENDPOINT_DIRECT=%s\\n' "$endpoint_direct"
+printf 'ENDPOINT_PROXY=%s\\n' "$endpoint_proxy"
+`;
+}
+
+function sshRemote(host, script, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn("ssh", [
+      "-T",
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=6",
+      "-o", "StrictHostKeyChecking=accept-new",
+      host,
+      "bash", "-s",
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGKILL"); } catch { /* 忽略 */ }
+      resolve({ ...value, latencyMs: Date.now() - started });
+    };
+    const timer = setTimeout(() => done({ ok: false, error: "SSH 超时", stdout, stderr }), timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 512 * 1024) stdout = stdout.slice(-512 * 1024);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > 128 * 1024) stderr = stderr.slice(-128 * 1024);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      done({ ok: false, error: error.message, stdout, stderr });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      done({ ok: code === 0, code, error: code === 0 ? null : (stderr.trim().slice(-240) || `ssh exit ${code}`), stdout, stderr });
+    });
+    child.stdin.end(script);
+  });
+}
+
+export function parseRemoteProbe(stdout) {
+  const values = {};
+  for (const line of String(stdout ?? "").split(/\r?\n/)) {
+    const index = line.indexOf("=");
+    if (index <= 0) continue;
+    values[line.slice(0, index).trim()] = line.slice(index + 1).trim();
+  }
+  const [directCodeText, directTimeText] = (values.ENDPOINT_DIRECT ?? "000|0").split("|");
+  const [proxyCodeText, proxyTimeText] = (values.ENDPOINT_PROXY ?? "000|0").split("|");
+  return {
+    hostname: values.HOSTNAME || null,
+    user: values.USER || null,
+    home: values.HOME || null,
+    hostsCount: Number(values.HOSTS_COUNT) || 0,
+    env: values.ENV || null,
+    installs: Number(values.INSTALLS) || 0,
+    wrapped: Number(values.WRAPPED) || 0,
+    wrapperProxy: values.WRAPPER_PROXY || null,
+    wrapperEnv: values.WRAPPER_ENV || null,
+    watcher: values.WATCHER || "inactive",
+    proxyService: values.PROXY_SERVICE || "inactive",
+    proxyPort: Number(values.PROXY_PORT) || 0,
+    runtime: Number(values.RUNTIME) || 0,
+    endpointDirectCode: Number(directCodeText) || 0,
+    endpointDirectTimeMs: Math.round((Number(directTimeText) || 0) * 1000),
+    endpointProxyCode: Number(proxyCodeText) || 0,
+    endpointProxyTimeMs: Math.round((Number(proxyTimeText) || 0) * 1000),
+  };
+}
+
+function proxyHostPort(proxy) {
+  if (!proxy) return null;
+  try {
+    const url = new URL(proxy);
+    return { host: url.hostname, port: Number(url.port) || 18443 };
+  } catch {
+    return null;
+  }
+}
+
+async function remoteStatusOne(item, index) {
+  const result = await sshRemote(item.host, remoteProbeScript(item.proxy, item.role), 15000);
+  if (!result.ok) {
+    return {
+      host: item.host,
+      label: item.label,
+      role: item.role,
+      proxy: item.proxy,
+      reachable: false,
+      health: "broken",
+      issues: [`SSH 不可达: ${result.error ?? "未知错误"}`],
+      latencyMs: result.latencyMs,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+  const probe = parseRemoteProbe(result.stdout);
+  const issues = [];
+  if (probe.installs === 0) issues.push("目录里没有 Qoder 远程安装（先在 Qoder 里连接一次）");
+  if (probe.installs > 0 && probe.wrapped < probe.installs) issues.push("有 Qoder 远程 node 还没有包装");
+  if (probe.watcher !== "active") issues.push("qoder-wrap-watch 没有运行");
+  if (probe.hostsCount < 4) issues.push("/etc/hosts 没有固定 Qoder 入口");
+  const httpdnsOff = (probe.env ?? "").includes("QODERCN_HTTPDNS=false") || (probe.wrapperEnv ?? "").includes("QODERCN_HTTPDNS=false");
+  if (!httpdnsOff) issues.push("远程 HTTPDNS 仍可能开启");
+  const directOk = probe.endpointDirectCode > 0 && probe.endpointDirectCode < 500;
+  const proxyOk = probe.endpointProxyCode > 0 && probe.endpointProxyCode < 500;
+  if (probe.installs > 0 && item.role !== "proxy" && item.proxy) {
+    const wrapper = probe.wrapperProxy ?? "";
+    if (!wrapper.includes(`HTTPS_PROXY=${item.proxy}`)) issues.push("远程 node 没有使用配置的代理");
+  }
+  if (item.role === "proxy" && probe.proxyService !== "active") issues.push("qoder-proxy 服务没有运行");
+  if (probe.installs > 0 && !directOk && !proxyOk) issues.push("远程 Qoder 入口不可达（直连和代理都失败）");
+  else if (probe.installs > 0 && !directOk && proxyOk) issues.push("远程直连入口不可达，代理路径可用");
+  else if (probe.installs > 0 && directOk && item.proxy && !proxyOk) issues.push("远程代理路径不可达，直连可用");
+  const broken = probe.installs > 0 && !directOk && !proxyOk;
+  return {
+    host: item.host,
+    label: item.label,
+    role: item.role,
+    proxy: item.proxy,
+    reachable: true,
+    hostname: probe.hostname,
+    user: probe.user,
+    home: probe.home,
+    latencyMs: result.latencyMs,
+    installs: probe.installs,
+    wrapped: probe.wrapped,
+    watcher: probe.watcher,
+    proxyService: probe.proxyService,
+    proxyPort: probe.proxyPort,
+    runtime: probe.runtime,
+    hostsCount: probe.hostsCount,
+    httpdnsOff,
+    wrapperProxy: probe.wrapperProxy,
+    endpointDirectCode: probe.endpointDirectCode,
+    endpointDirectTimeMs: probe.endpointDirectTimeMs,
+    endpointProxyCode: probe.endpointProxyCode,
+    endpointProxyTimeMs: probe.endpointProxyTimeMs,
+    health: broken ? "broken" : issues.length ? "warning" : "ok",
+    issues,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+export async function qoderRemoteStatus() {
+  const { hosts, configured, file } = loadQoderRemotes();
+  if (!hosts.length) {
+    return { command: "qoder-remote-status", configured, file, hosts: [], checkedAt: new Date().toISOString() };
+  }
+  const results = await Promise.all(hosts.map((item) => remoteStatusOne(item, 0)));
+  const ok = results.filter((item) => item.health === "ok").length;
+  return {
+    command: "qoder-remote-status",
+    configured,
+    file,
+    hosts: results,
+    summary: { total: results.length, ok, warning: results.filter((item) => item.health === "warning").length, broken: results.filter((item) => item.health === "broken").length },
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+const REMOTE_ACTIONS = {
+  "restart-watcher": 'systemctl --user restart qoder-wrap-watch && systemctl --user is-active qoder-wrap-watch',
+  "enable-watcher": 'systemctl --user enable --now qoder-wrap-watch && systemctl --user is-active qoder-wrap-watch',
+  "restart-proxy": 'systemctl --user restart qoder-proxy && systemctl --user is-active qoder-proxy',
+  "restart-worker": "pkill -u \"$(id -un)\" -f '[r]untime-host.cjs' || true; echo stopped",
+  "wrap": 'bash "$HOME/.qoder-cn/wrap-qoder-node.sh"',
+};
+
+export async function qoderRemoteAction(host, action) {
+  const { hosts } = loadQoderRemotes();
+  const item = hosts.find((entry) => entry.host === host || entry.label === host);
+  if (!item) throw new Error(`没有配置远程机器 ${host}`);
+  if (!REMOTE_ACTIONS[action]) throw new Error(`不支持的远程操作: ${action}`);
+  if (action === "restart-proxy" && item.role !== "proxy") throw new Error("只有代理机器可以重启 qoder-proxy");
+  const result = await sshRemote(item.host, `${REMOTE_ACTIONS[action]}\n`, 20000);
+  const status = await qoderRemoteStatus();
+  return {
+    ok: result.ok,
+    command: "qoder-remote-action",
+    host: item.host,
+    action,
+    output: result.stdout.trim().split(/\r?\n/).slice(-8).join("\n"),
+    error: result.ok ? null : (result.error ?? "远程操作失败"),
+    status,
+  };
+}

@@ -8,6 +8,7 @@ import {
   ensureRules,
   hostsWithBlock,
   parseProfiles,
+  parseRemoteProbe,
 } from "../src/qoder-network.mjs";
 
 test("hosts block is added and removed without touching other lines", () => {
@@ -74,4 +75,30 @@ items:
   assert.equal(parsed.items.find((item) => item.uid === "R1")?.node, "UK");
   assert.equal(parsed.items.find((item) => item.uid === "R1")?.rules, "RU1");
   assert.equal(parsed.items.find((item) => item.uid === "R1")?.merge, "M1");
+});
+
+test("parseRemoteProbe reads direct and proxy endpoint paths", () => {
+  const probe = parseRemoteProbe(`HOSTNAME=sr650
+USER=wangyiming
+HOSTS_COUNT=4
+ENV=QODERCN_HTTPDNS=false
+INSTALLS=2
+WRAPPED=2
+WRAPPER_PROXY=export HTTPS_PROXY=http://127.0.0.1:18443
+WRAPPER_ENV=export QODERCN_HTTPDNS=false
+WATCHER=active
+PROXY_SERVICE=active
+PROXY_PORT=1
+RUNTIME=0
+ENDPOINT_DIRECT=200|0.15
+ENDPOINT_PROXY=000|6.0
+`);
+  assert.equal(probe.hostname, "sr650");
+  assert.equal(probe.installs, 2);
+  assert.equal(probe.wrapped, 2);
+  assert.equal(probe.hostsCount, 4);
+  assert.equal(probe.watcher, "active");
+  assert.equal(probe.endpointDirectCode, 200);
+  assert.equal(probe.endpointDirectTimeMs, 150);
+  assert.equal(probe.endpointProxyCode, 0);
 });

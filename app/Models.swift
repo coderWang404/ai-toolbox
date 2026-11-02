@@ -653,3 +653,61 @@ struct QoderActionResult: Codable {
     let status: QoderStatusResult?
     let error: String?
 }
+
+// MARK: - Qoder 远程
+
+struct QoderRemoteHostInfo: Codable {
+    let host: String
+    let label: String?
+    let role: String?
+    let proxy: String?
+    let reachable: Bool?
+    let hostname: String?
+    let user: String?
+    let home: String?
+    let latencyMs: Int?
+    let installs: Int?
+    let wrapped: Int?
+    let watcher: String?
+    let proxyService: String?
+    let proxyPort: Int?
+    let runtime: Int?
+    let hostsCount: Int?
+    let httpdnsOff: Bool?
+    let wrapperProxy: String?
+    let endpointDirectCode: Int?
+    let endpointDirectTimeMs: Int?
+    let endpointProxyCode: Int?
+    let endpointProxyTimeMs: Int?
+    let health: String?
+    let issues: [String]?
+    let checkedAt: String?
+}
+
+struct QoderRemoteSummary: Codable {
+    let total: Int
+    let ok: Int
+    let warning: Int
+    let broken: Int
+}
+
+struct QoderRemoteReport: Codable {
+    let ok: Bool?
+    let command: String?
+    let configured: Bool?
+    let file: String?
+    let hosts: [QoderRemoteHostInfo]?
+    let summary: QoderRemoteSummary?
+    let checkedAt: String?
+    let error: String?
+}
+
+struct QoderRemoteActionReport: Codable {
+    let ok: Bool
+    let command: String?
+    let host: String?
+    let action: String?
+    let output: String?
+    let error: String?
+    let status: QoderRemoteReport?
+}

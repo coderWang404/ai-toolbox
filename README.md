@@ -14,7 +14,7 @@
 | ClinePass 额度 | ClinePass 多密钥三窗口额度和余额 |
 | Grok Bot | 读取本机登录态，在本机启动 OpenAI 兼容网关 |
 | 网络测速 | 出口信息、延迟、上下行测速 |
-| Qoder 网络 | Qoder CN 的 DNS/hosts、Clash TUN、HTTPDNS 状态与一键修复 |
+| Qoder 网络 | 本机 Qoder CN + 远程机器的 DNS/hosts、Clash、HTTPDNS 状态与管理 |
 | Today | 独立模块：通过 CDP 使用 Today.app，导出 OpenAI 兼容网关 |
 
 - **桌面 App**：`AI 工具箱.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
@@ -90,6 +90,8 @@ ai-toolbox cline-quota             # 查询 ClinePass 三窗口额度和余额
 ai-toolbox qoder-status            # Qoder 网络状态（DNS/hosts/Clash/HTTPDNS/日志）
 ai-toolbox qoder-fix               # 修复 Qoder 网络（会请求管理员授权改 hosts）
 ai-toolbox qoder-restore           # 还原 Qoder 网络修复
+ai-toolbox qoder-remote-status     # 查看远程机器上的 Qoder 状态
+ai-toolbox qoder-remote-action --host <别名> --action <动作>
 ai-toolbox today-status            # Today.app 登录态、模型目录、本地网关状态
 ai-toolbox today-models            # 列出 Today 账号可用模型
 ai-toolbox today-chat "你好"        # 向 Today 发一条消息
@@ -153,7 +155,7 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 ## 测试与构建
 
 ```bash
-npm test                 # Node 单元 + CLI 集成测试（34 项）
+npm test                 # Node 单元 + CLI 集成测试（35 项）
 npm run typecheck        # swiftc -typecheck
 npm run build            # 构建 dist/AI 工具箱.app（macOS 14+）
 ```
@@ -176,6 +178,30 @@ Qoder 页把「Qoder CN 校园网 443 拦截」那套排查做成了可视化：
 - 恢复默认：反向移除上述改动
 
 对应命令：`qoder-status` / `qoder-fix` / `qoder-restore` / `qoder-httpdns on|off` / `qoder-restart` / `qoder-open`。
+
+页面里的「本机详情」默认折叠；「远程 Qoder」默认折叠，第一次展开时才通过 SSH 检查，不会拖慢每次打开页面。
+
+### Qoder 远程
+
+远程机器通过 `~/.ai-toolbox/qoder-remotes.json` 配置，不把主机地址写进仓库：
+
+```json
+{
+  "hosts": [
+    { "host": "qoder-a100", "label": "A100", "proxy": "http://proxy-host:18443" },
+    { "host": "qoder-4080", "label": "4080", "role": "proxy" }
+  ]
+}
+```
+
+`host` 是 `~/.ssh/config` 里的别名；`proxy` 是可选代理；`role: "proxy"` 表示这台机器自己跑 `qoder-proxy`。远程页会显示 SSH 延迟、Qoder 远程安装/包装数量、watcher、runtime、hosts、HTTPDNS、直连入口和代理入口，并可执行：
+
+- 重新包装 `wrap`
+- 重启 watcher
+- 重启 worker
+- 代理机器重启 `qoder-proxy`
+
+远程操作只走 SSH 密钥（`BatchMode=yes`），不会在 App 里保存密码。
 
 ## Today 独立模块
 
