@@ -538,3 +538,118 @@ struct TodayChatResult: Codable {
     let elapsedMs: Int?
     let error: String?
 }
+
+// MARK: - Qoder 网络
+
+struct QoderAppInfo: Codable {
+    let installed: Bool
+    let running: Bool
+    let version: String?
+    let pids: [Int]?
+}
+
+struct QoderHostEntry: Codable {
+    let ip: String
+    let domain: String
+}
+
+struct QoderHostsInfo: Codable {
+    let entries: [QoderHostEntry]?
+    let pinned: Bool?
+    let ip: String?
+    let backup: String?
+}
+
+struct QoderDNSGroup: Codable {
+    let gateway: [String]?
+    let openapi: [String]?
+}
+
+struct QoderDNSInfo: Codable {
+    let system: QoderDNSGroup?
+    let clash: QoderDNSGroup?
+    let fakeIP: Bool?
+    let resolver: String?
+}
+
+struct QoderHttpdnsInfo: Codable {
+    let env: String?
+    let disabled: Bool?
+    let agentInstalled: Bool?
+    let agentLoaded: Bool?
+}
+
+struct QoderClashInfo: Codable {
+    let installed: Bool?
+    let running: Bool?
+    let tunEnabled: Bool?
+    let fakeIP: Bool?
+    let useSystemHosts: Bool?
+    let qoderRules: Bool?
+    let ruleIndex: Int?
+    let qoderHostsPresent: Bool?
+    let profile: String?
+    let node: String?
+    let generatedPath: String?
+    let generatedAt: String?
+    let socketPath: String?
+    let runtimeTun: Bool?
+    let message: String?
+}
+
+struct QoderLogInfo: Codable {
+    let latestRun: String?
+    let networkMode: String?
+    let httpdnsConfigured: Bool?
+    let lastModelStatus: Int?
+    let lastError: String?
+    let updatedAt: String?
+}
+
+struct QoderEndpointInfo: Codable {
+    let name: String
+    let via: String?
+    let domain: String?
+    let ip: String?
+    let url: String?
+    let status: Int?
+    let timeMs: Int?
+    let remoteIP: String?
+    let reachable: Bool?
+    let error: String?
+}
+
+struct QoderStatusResult: Codable {
+    let ok: Bool?
+    let app: QoderAppInfo?
+    let hosts: QoderHostsInfo?
+    let dns: QoderDNSInfo?
+    let httpdns: QoderHttpdnsInfo?
+    let clash: QoderClashInfo?
+    let log: QoderLogInfo?
+    let endpoints: [QoderEndpointInfo]?
+    let health: String?
+    let issues: [String]?
+    let checkedAt: String?
+    let error: String?
+}
+
+struct QoderActionStep: Codable {
+    let step: String
+    let ok: Bool?
+    let message: String?
+    let applied: Bool?
+    let skipped: Bool?
+    let backup: String?
+    let moved: [String]?
+    let disabled: Bool?
+}
+
+struct QoderActionResult: Codable {
+    let ok: Bool
+    let action: String?
+    let message: String?
+    let steps: [QoderActionStep]?
+    let status: QoderStatusResult?
+    let error: String?
+}

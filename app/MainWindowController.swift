@@ -30,6 +30,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var speedController: SpeedPane!
     private var todayPane: NSView!
     private var todayController: TodayPane!
+    private var qoderPane: NSView!
+    private var qoderController: QoderNetworkPane!
     private let codexKeyHost = NSStackView()
     private let claudeKeyHost = NSStackView()
     private var iqProviderPopup: NSPopUpButton!
@@ -461,6 +463,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         todayController = TodayPane(backend: backend)
         todayController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 8, text) }
         todayPane = todayController.root
+        qoderController = QoderNetworkPane(backend: backend)
+        qoderController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 9, text) }
+        qoderPane = qoderController.root
 
         codexPane = wrapPage("Codex", "跟随 cc-switch 热切换 Codex 供应商", codexPane)
         claudePane = wrapPage("Claude Desktop", "跟随 cc-switch 的 Claude Desktop 供应商，切换后重新打开应用", claudePane)
@@ -471,7 +476,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let content = NSViewController()
         let host = NSView()
         host.wantsLayer = true
-        for pane in [codexPane!, claudePane!, ccPane!, iqPane!, quotaPane!, clinePane!, grokPane!, speedPane!, todayPane!] {
+        for pane in [codexPane!, claudePane!, ccPane!, iqPane!, quotaPane!, clinePane!, grokPane!, speedPane!, todayPane!, qoderPane!] {
             pane.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(pane)
         NSLayoutConstraint.activate([
@@ -494,7 +499,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         split.splitView.setPosition(220, ofDividerAt: 0)
 
         let savedPage = defaults.integer(forKey: "mainPage")
-        showPage([1, 2, 3, 4, 5, 6, 7, 8].contains(savedPage) ? savedPage : 0)
+        showPage([1, 2, 3, 4, 5, 6, 7, 8, 9].contains(savedPage) ? savedPage : 0)
         if ccSyncEnabled() { startCcSwitchFollow() }
         startIqCatalogWatch()
     }
@@ -1695,13 +1700,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     func selectPage(_ index: Int) {
-        let page = [0, 1, 2, 3, 4, 5, 6, 7, 8].contains(index) ? index : 0
+        let page = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].contains(index) ? index : 0
         defaults.set(page, forKey: "mainPage")
         showPage(page)
     }
 
     private func showPage(_ index: Int) {
-        let pages = [codexPane, claudePane, ccPane, iqPane, quotaPane, clinePane, grokPane, speedPane, todayPane]
+        let pages = [codexPane, claudePane, ccPane, iqPane, quotaPane, clinePane, grokPane, speedPane, todayPane, qoderPane]
         let visible = pane(for: index)
         for pane in pages {
             pane?.isHidden = pane !== visible
@@ -1717,6 +1722,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         if index == 6 { grokController?.onShow() }
         if index == 7 { speedController?.onShow() } else { speedController?.onHide() }
         if index == 8 { todayController?.onShow() }
+        if index == 9 { qoderController?.onShow() }
         refreshSidebar()
     }
 
@@ -1730,6 +1736,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         case 6: return grokPane
         case 7: return speedPane
         case 8: return todayPane
+        case 9: return qoderPane
         default: return codexPane
         }
     }
@@ -1753,6 +1760,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         sidebar?.setDetail(page: 6, grokController?.sidebarDetail() ?? "本机网关")
         sidebar?.setDetail(page: 7, speedController?.sidebarDetail() ?? "未测速")
         sidebar?.setDetail(page: 8, todayController?.sidebarDetail() ?? "独立网关")
+        sidebar?.setDetail(page: 9, qoderController?.sidebarDetail() ?? "Qoder 网络")
     }
 
     private func iqSidebarDetail() -> String {

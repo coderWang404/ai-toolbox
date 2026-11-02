@@ -21,6 +21,7 @@ final class SettingsSidebarController: NSViewController, NSTableViewDataSource, 
         Item(page: 6, title: "Grok Bot", symbol: "sparkles", tint: .systemIndigo, detail: "本机网关"),
         Item(page: 7, title: "网络测速", symbol: "speedometer", tint: .systemCyan, detail: "未测速"),
         Item(page: 8, title: "Today", symbol: "text.bubble.fill", tint: .systemBrown, detail: "独立网关"),
+        Item(page: 9, title: "Qoder 网络", symbol: "network", tint: .systemMint, detail: "DNS / Clash / HTTPDNS"),
     ]
     private let table = NSTableView()
     private var suppressSelection = false

@@ -14,6 +14,7 @@
 | ClinePass 额度 | ClinePass 多密钥三窗口额度和余额 |
 | Grok Bot | 读取本机登录态，在本机启动 OpenAI 兼容网关 |
 | 网络测速 | 出口信息、延迟、上下行测速 |
+| Qoder 网络 | Qoder CN 的 DNS/hosts、Clash TUN、HTTPDNS 状态与一键修复 |
 | Today | 独立模块：通过 CDP 使用 Today.app，导出 OpenAI 兼容网关 |
 
 - **桌面 App**：`AI 工具箱.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
@@ -86,6 +87,9 @@ ai-toolbox claude-list             # 列出 Claude Desktop 供应商
 ai-toolbox iq-list                 # 列出可用于智商测试的供应商
 ai-toolbox go-quota                # 查询 OpenCode Go 三窗口额度
 ai-toolbox cline-quota             # 查询 ClinePass 三窗口额度和余额
+ai-toolbox qoder-status            # Qoder 网络状态（DNS/hosts/Clash/HTTPDNS/日志）
+ai-toolbox qoder-fix               # 修复 Qoder 网络（会请求管理员授权改 hosts）
+ai-toolbox qoder-restore           # 还原 Qoder 网络修复
 ai-toolbox today-status            # Today.app 登录态、模型目录、本地网关状态
 ai-toolbox today-models            # 列出 Today 账号可用模型
 ai-toolbox today-chat "你好"        # 向 Today 发一条消息
@@ -149,7 +153,7 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 ## 测试与构建
 
 ```bash
-npm test                 # Node 单元 + CLI 集成测试（29 项）
+npm test                 # Node 单元 + CLI 集成测试（34 项）
 npm run typecheck        # swiftc -typecheck
 npm run build            # 构建 dist/AI 工具箱.app（macOS 14+）
 ```
@@ -158,6 +162,20 @@ npm run build            # 构建 dist/AI 工具箱.app（macOS 14+）
 > `Authorization: Bearer <token>`，token 分别保存在
 > `~/.ai-toolbox/grok-gateway-token`、`~/.ai-toolbox/today-gateway-token`（0600），
 > App 页面里可以直接复制。设置 `GROKBOT_ALLOW_ANONYMOUS=1` 才会关闭 Grok 鉴权。
+
+## Qoder 网络
+
+Qoder 页把「Qoder CN 校园网 443 拦截」那套排查做成了可视化：
+
+- Qoder 版本/运行状态、日志里的 `networkMode` / `httpdnsConfigured` / 最近模型请求
+- `/etc/hosts` 是否固定到 `8.153.206.47`
+- 系统 DNS 与 Clash DNS 的解析结果、是否 fake-IP
+- Clash TUN、`use-system-hosts`、Qoder 直连规则及规则序号
+- gateway / openapi 固定入口与系统 DNS 的实测 HTTP 状态和耗时
+- 一键修复：写 hosts（系统管理员授权）、关闭 HTTPDNS 并安装 LaunchAgent、给 Clash 加直连规则、清理缓存、重启 Qoder
+- 恢复默认：反向移除上述改动
+
+对应命令：`qoder-status` / `qoder-fix` / `qoder-restore` / `qoder-httpdns on|off` / `qoder-restart` / `qoder-open`。
 
 ## Today 独立模块
 
@@ -230,13 +248,14 @@ src/verify-client.mjs     一次性 app-server 校验
 src/reloader.mjs          app-server 发现 + 平滑重启
 src/watcher.mjs           watch 模式
 src/remote-sync.mjs       远程供应商同步
+src/qoder-network.mjs     Qoder 网络状态、修复与还原
 src/today-gateway.mjs     Today 模块：状态、模型、对话、网关
 src/today/                vendored Today CDP 客户端与 OpenAI 兼容服务
 src/remotes.json          内置远程机器（默认空）
 test/                     Node 单元与集成测试
 docs/screenshot.png       界面演示图
 src/templates/            cc-switch 的模型目录模板（vendored）
-app/                      桌面 App（Swift / AppKit，含 TodayPane）
+app/                      桌面 App（Swift / AppKit，含 TodayPane、QoderNetworkPane）
 tools/make-icon.swift     图标生成
 build-app.sh              一键构建 .app
 dist/AI 工具箱.app         构建产物

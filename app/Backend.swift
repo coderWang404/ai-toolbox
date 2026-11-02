@@ -697,6 +697,28 @@ final class Backend {
         if let process = controlledProcess, process.isRunning { process.terminate() }
     }
 
+    // MARK: - Qoder 网络
+
+    func qoderStatus() throws -> QoderStatusResult {
+        try decode(QoderStatusResult.self, from: run(["qoder-status"], timeout: 40))
+    }
+
+    func qoderFix() throws -> QoderActionResult {
+        try decode(QoderActionResult.self, from: run(["qoder-fix"], timeout: 240))
+    }
+
+    func qoderRestore() throws -> QoderActionResult {
+        try decode(QoderActionResult.self, from: run(["qoder-restore"], timeout: 240))
+    }
+
+    func qoderRestart() throws -> QoderActionResult {
+        try decode(QoderActionResult.self, from: run(["qoder-restart"], timeout: 40))
+    }
+
+    func qoderOpen() throws -> QoderActionResult {
+        try decode(QoderActionResult.self, from: run(["qoder-open"], timeout: 20))
+    }
+
     func grokStatus() throws -> GrokStatus {
         try decode(GrokStatus.self, from: run(["grok-status"], timeout: 30, withSecrets: true))
     }

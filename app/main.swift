@@ -240,6 +240,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         openSpeed.target = self
         menu.addItem(openSpeed)
 
+        menu.addItem(.sectionHeader(title: "Qoder 网络"))
+        let openQoderNetwork = NSMenuItem(title: "打开 Qoder 网络", action: #selector(showQoderNetworkPage), keyEquivalent: "")
+        openQoderNetwork.target = self
+        menu.addItem(openQoderNetwork)
+
         menu.addItem(.sectionHeader(title: "Today"))
         let openToday = NSMenuItem(title: "打开 Today", action: #selector(showTodayPage), keyEquivalent: "")
         openToday.target = self
@@ -334,6 +339,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showTodayPage() {
         windowController.selectPage(8)
+        showWindow()
+    }
+
+    @objc private func showQoderNetworkPage() {
+        windowController.selectPage(9)
         showWindow()
     }
 
@@ -454,6 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         · Claude Desktop：跟随 cc-switch 的桌面供应商，重新打开应用后生效
         · cc-switch：以本机配置为准，实时同步远程的供应商、端点和当前选择
         · Today：通过 CDP 使用 Today.app，并导出独立的 OpenAI 兼容网关
+        · Qoder 网络：DNS/hosts、Clash TUN、HTTPDNS 状态与一键修复
         · 工具目录：\(backend.scriptPath.map { URL(fileURLWithPath: $0).deletingLastPathComponent().deletingLastPathComponent().path } ?? "未找到")
         """
         alert.alertStyle = .informational

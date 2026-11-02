@@ -37,6 +37,17 @@ import { addKeys as addClineKeys, listKeys as listClineKeys, parseKeyText as par
 import { completeChat, startServer, status as grokStatus } from "../src/grok-bot.mjs";
 import { networkInfo, runSpeedTest } from "../src/net-speed.mjs";
 import {
+  qoderStatus,
+  applyQoderFix,
+  restoreQoderDefaults,
+  setHttpdnsDisabled,
+  patchClash,
+  setHosts,
+  clearQoderCaches,
+  restartQoder,
+  openQoder,
+} from "../src/qoder-network.mjs";
+import {
   todayStatus,
   todayModels,
   todayChat,
@@ -78,6 +89,12 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox grok-serve            在 127.0.0.1:8765 启动 OpenAI 兼容网关
   ai-toolbox net-info              查看当前网络接口、地址和出口
   ai-toolbox net-speed             测延迟、下载和上传，并持续输出过程
+  ai-toolbox qoder-status          Qoder CN 网络状态（DNS/hosts/Clash/HTTPDNS/日志）
+  ai-toolbox qoder-fix             修复本机 Qoder 网络（hosts + HTTPDNS + Clash，需管理员授权）
+  ai-toolbox qoder-restore         还原 Qoder 网络修复
+  ai-toolbox qoder-restart         重启 Qoder CN
+  ai-toolbox qoder-open            打开 Qoder CN
+  ai-toolbox qoder-httpdns <on|off> 开启/关闭 Qoder HTTPDNS
   ai-toolbox today-status          Today.app 登录态、模型目录与本地网关状态
   ai-toolbox today-models          列出 Today 账号可用的模型
   ai-toolbox today-chat <文本>     向 Today 助手发一条消息（--model 指定模型）
@@ -608,6 +625,42 @@ async function cmdIqRun(query, opts) {
   return { command: "iq-run", ...result, provider: publicIqProvider(provider) };
 }
 
+async function cmdQoderStatus(opts) {
+  const status = await qoderStatus();
+  if (!opts.json) {
+    opts.log(`\nQoder CN: ${status.app.installed ? `已安装 ${status.app.version ?? ""}` : "未安装"}${status.app.running ? " · 运行中" : " · 未运行"}`);
+    opts.log(`hosts: ${status.hosts.pinned ? `已固定 ${status.hosts.ip}` : "未固定"}`);
+    opts.log(`HTTPDNS: ${status.httpdns.disabled ? "已关闭" : "开启"} · LaunchAgent ${status.httpdns.agentInstalled ? "已安装" : "未安装"}`);
+    opts.log(`Clash: TUN ${status.clash.tunEnabled ? "开" : "关"} · fake-IP ${status.clash.fakeIP ? "是" : "否"} · 系统 hosts ${status.clash.useSystemHosts ? "是" : "否"} · Qoder 直连 ${status.clash.qoderRules ? "有" : "无"}`);
+    opts.log(`Qoder 日志: networkMode=${status.log.networkMode ?? "-"} httpdnsConfigured=${status.log.httpdnsConfigured ?? "-"} model=${status.log.lastModelStatus ?? "-"}`);
+    for (const endpoint of status.endpoints) {
+      opts.log(`  ${endpoint.name} [${endpoint.via}] ${endpoint.status ?? "-"} ${endpoint.timeMs ?? "-"}ms ${endpoint.remoteIP ?? ""}`);
+    }
+    if (status.issues.length) opts.log(`\n⚠️ ${status.issues.join("；")}`);
+  }
+  return status;
+}
+
+async function cmdQoderFix(opts) {
+  const result = await applyQoderFix({ restart: true });
+  if (!opts.json && result.status) await cmdQoderStatus(opts);
+  if (!result.ok) return { ...result, error: result.message ?? "Qoder 网络修复没有完成" };
+  return result;
+}
+
+async function cmdQoderRestore(opts) {
+  const result = await restoreQoderDefaults({ restart: true });
+  if (!opts.json && result.status) await cmdQoderStatus(opts);
+  return result;
+}
+
+async function cmdQoderHttpdns(value, opts) {
+  if (value !== "on" && value !== "off") throw new Error("用法: ai-toolbox qoder-httpdns <on|off>");
+  const result = await setHttpdnsDisabled(value === "off");
+  if (!opts.json) opts.log(`Qoder HTTPDNS 已${value === "off" ? "关闭" : "开启"}`);
+  return { command: "qoder-httpdns", value, ...result };
+}
+
 async function cmdTodayStatus(opts) {
   const info = await todayStatus({ port: opts.port ?? todayPort(), includeSecrets: opts.secrets });
   if (!opts.json) {
@@ -960,6 +1013,24 @@ async function main() {
     case "net-speed":
       await runSpeedTest((event) => console.log(JSON.stringify(event)));
       return;
+    case "qoder-status":
+      result = await cmdQoderStatus(opts);
+      break;
+    case "qoder-fix":
+      result = await cmdQoderFix(opts);
+      break;
+    case "qoder-restore":
+      result = await cmdQoderRestore(opts);
+      break;
+    case "qoder-restart":
+      result = await restartQoder();
+      break;
+    case "qoder-open":
+      result = await openQoder();
+      break;
+    case "qoder-httpdns":
+      result = await cmdQoderHttpdns(arg, opts);
+      break;
     case "today-status":
       result = await cmdTodayStatus(opts);
       break;

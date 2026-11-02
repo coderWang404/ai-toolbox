@@ -1,4 +1,4 @@
-> 状态说明（2026-11）：这份 spec 写于只有 4 个页面的时期。现在侧栏已有 9 页（编号 0–8，新增 OpenCode 额度、ClinePass 额度、Grok Bot、网络测速、Today）。split view、分组卡片、source list、深浅色已经落地；页面标题顶距、切页淡入、拆 Pages/*.swift、8 张验收截图仍未完成。修改界面时请以当前 9 页结构为准。
+> 状态说明（2026-11）：这份 spec 写于只有 4 个页面的时期。现在侧栏已有 10 页（编号 0–9，新增 OpenCode 额度、ClinePass 额度、Grok Bot、网络测速、Today、Qoder 网络）。split view、分组卡片、source list、深浅色已经落地；页面标题顶距、切页淡入、拆 Pages/*.swift、8 张验收截图仍未完成。修改界面时请以当前 10 页结构为准。
 
 # 界面重做 spec：贴近 macOS 系统设置的风格
 
