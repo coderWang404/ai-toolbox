@@ -186,6 +186,20 @@ export class CgiClient {
     if (!this.autoRefresh) return this.session;
     const exp = Number(this.session.tokenExpiredTime ?? 0);
     if (!force && exp > 0 && exp - Date.now() > TOKEN_REFRESH_MARGIN_MS) return this.session;
+
+    // 常驻进程会把登录态一直放在内存里；用户重新抓了 cookie 之后磁盘上可能已经更新，
+    // 先读一次磁盘，能少一次网络续期，也能接住外部手写的登录态。
+    try {
+      const fromDisk = loadSession();
+      const diskExp = Number(fromDisk.tokenExpiredTime ?? 0);
+      if (fromDisk.token !== this.session.token) {
+        this.session = fromDisk;
+        if (diskExp - Date.now() > TOKEN_REFRESH_MARGIN_MS) return this.session;
+      }
+    } catch {
+      // 磁盘上没有/读不出来，照常走续期
+    }
+
     this.session = await refreshSession({ session: this.session, fetchImpl: this.fetch });
     return this.session;
   }

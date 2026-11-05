@@ -247,6 +247,8 @@ ai-toolbox notes-daemon --once         # 只跑一轮常驻循环（--interval �
 }
 ```
 
+同步映射表在 `~/.ai-toolbox/notes-sync-state.json`（vault 之外，不进百度云）；回收站在 `~/.ai-toolbox/notes-sync-trash/`，远端覆盖本地前先把旧版本移进去。
+
 `knowledgeBaseName` 是 cgi 侧的名字（个人知识库的 cgi ID 等于 userId），`knowledgeBaseId` 是 OpenAPI 侧的 `ima_kb_xxx`，两套 ID 不通用。`rootPath` 是 vault 根在知识库里对应的文件夹名。
 
 ### 为什么整条链路只用文件型条目
