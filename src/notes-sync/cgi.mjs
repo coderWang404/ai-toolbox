@@ -31,6 +31,9 @@ export const AUTH_LOGIN = `${CGI_BASE}/auth_login`;
 
 // IMA-TOKEN 只有 2 小时（tokenValidTime=7200），提前 5 分钟续，避免同步跑到一半断掉。
 export const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+// 固定心跳：即使小票还没到临期，也用这个间隔主动刷一次。
+// 目的是把「宁可能被服务端滑动续期」的可能性吃满——只要进程活着就一直有活跃续期。
+export const DEFAULT_HEARTBEAT_MS = 30 * 60 * 1000;
 
 /** 条目类型（实测值）。 */
 export const MEDIA_TYPE = Object.freeze({
@@ -162,12 +165,17 @@ export async function refreshSession({ session, file = sessionPath(), fetchImpl 
 }
 
 export class CgiClient {
-  constructor({ session, baseUrl = CGI_BASE, fetchImpl, referer = "https://ima.qq.com/wikis", autoRefresh = true } = {}) {
+  constructor({
+    session, baseUrl = CGI_BASE, fetchImpl, referer = "https://ima.qq.com/wikis",
+    autoRefresh = true, heartbeatMs = DEFAULT_HEARTBEAT_MS,
+  } = {}) {
     this.session = session ?? loadSession();
     this.baseUrl = baseUrl;
     this.fetch = fetchImpl ?? globalThis.fetch;
     this.referer = referer;
     this.autoRefresh = autoRefresh;
+    this.heartbeatMs = heartbeatMs;
+    this._lastRefreshAt = 0;
     this._kbCache = null;
   }
 
@@ -181,11 +189,14 @@ export class CgiClient {
     };
   }
 
-  /** 小票快过期（或强制）就先续期，返回当前可用的登录态。 */
-  async ensureFresh({ force = false } = {}) {
+  /** 小票临期、到心跳点、或被强制时续期，返回当前可用的登录态。 */
+  async ensureFresh({ force = false, heartbeat = true } = {}) {
     if (!this.autoRefresh) return this.session;
     const exp = Number(this.session.tokenExpiredTime ?? 0);
-    if (!force && exp > 0 && exp - Date.now() > TOKEN_REFRESH_MARGIN_MS) return this.session;
+    const nearExpiry = !(exp > 0 && exp - Date.now() > TOKEN_REFRESH_MARGIN_MS);
+    const heartbeatDue = heartbeat && this.heartbeatMs > 0
+      && Date.now() - this._lastRefreshAt > this.heartbeatMs;
+    if (!force && !nearExpiry && !heartbeatDue) return this.session;
 
     // 常驻进程会把登录态一直放在内存里；用户重新抓了 cookie 之后磁盘上可能已经更新，
     // 先读一次磁盘，能少一次网络续期，也能接住外部手写的登录态。
@@ -194,13 +205,17 @@ export class CgiClient {
       const diskExp = Number(fromDisk.tokenExpiredTime ?? 0);
       if (fromDisk.token !== this.session.token) {
         this.session = fromDisk;
-        if (diskExp - Date.now() > TOKEN_REFRESH_MARGIN_MS) return this.session;
+        if (diskExp - Date.now() > TOKEN_REFRESH_MARGIN_MS) {
+          this._lastRefreshAt = Date.now();
+          return this.session;
+        }
       }
     } catch {
       // 磁盘上没有/读不出来，照常走续期
     }
 
     this.session = await refreshSession({ session: this.session, fetchImpl: this.fetch });
+    this._lastRefreshAt = Date.now();
     return this.session;
   }
 
