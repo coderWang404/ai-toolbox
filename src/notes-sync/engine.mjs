@@ -195,11 +195,21 @@ export class SyncEngine {
     }
 
     const baseLocalHash = sha256(Buffer.from(content, "utf8"));
+    // 推送后回读一次：ima 会把 Markdown 规范化（- → *、表头加粗、表格列宽对齐），
+    // 远端实际内容与推送原文并不逐字节相同。不记录真实远端 hash 的话，
+    // 下一轮会一直判定「远端改过」，形成无休止的回写。
+    let baseRemoteHash = baseLocalHash;
+    try {
+      const back = await this.client.getDocContent(noteId, this.contentFormat);
+      baseRemoteHash = sha256(Buffer.from(String(back?.content ?? ""), "utf8"));
+    } catch (err) {
+      this.log(`  ! 推送后回读失败，下一轮会再校准: ${err.message}`);
+    }
     putRecord(this.state, file.path, {
       title, noteId, mediaId: added?.media_id ?? rec?.mediaId ?? null,
       kbId: this.config.knowledgeBaseId,
       baseLocalHash,
-      baseRemoteHash: baseLocalHash,
+      baseRemoteHash,
       remoteModifyTime: modifyTime || Date.now(),
       lastSyncAt: Date.now(),
       lastLocalMtimeMs: file.mtimeMs,

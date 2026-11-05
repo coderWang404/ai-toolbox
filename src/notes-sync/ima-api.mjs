@@ -117,12 +117,18 @@ export class ImaClient {
     return call(EP.LIST_NOTE_BY_FOLDER, { folder_id: folderId, cursor, limit }, this.creds);
   }
 
-  /** 分页拉全部笔记，返回 [{noteId, title, modifyTime, ...}]。 */
-  async allNotes({ folderId = "", limit = 50, maxPages = 50 } = {}) {
+  /**
+   * 分页拉全部笔记，返回 [{noteId, title, modifyTime, ...}]。
+   * 实测：服务端 limit 硬限制 (0, 20]，超出返回 code 51；
+   * 且返回体只有 is_end、没有 next_cursor —— cursor 实际是「偏移量」，
+   * 传 "0"/"1"/"3" 依次往后滑（已用真实凭证逐值验证）。
+   */
+  async allNotes({ folderId = "", limit = 20, maxPages = 200 } = {}) {
     const out = [];
-    let cursor = "";
+    const pageSize = Math.min(Math.max(Number(limit) || 20, 1), 20);
+    let offset = 0;
     for (let page = 0; page < maxPages; page++) {
-      const data = await this.listNotes({ folderId, cursor, limit });
+      const data = await this.listNotes({ folderId, cursor: String(offset), limit: pageSize });
       const list = data?.note_book_list ?? data?.note_list ?? [];
       for (const item of list) {
         const info = item?.basic_info?.basic_info ?? item?.basic_info ?? item;
@@ -135,8 +141,8 @@ export class ImaClient {
           raw: item,
         });
       }
-      cursor = data?.next_cursor ?? data?.cursor ?? "";
-      if (!cursor || data?.is_end === true || list.length === 0) break;
+      offset += list.length;
+      if (data?.is_end === true || list.length === 0) break;
     }
     return out;
   }

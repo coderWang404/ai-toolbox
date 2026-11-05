@@ -28,6 +28,26 @@ export function toIma(localContent) {
   return stripImaAppendix(localContent);
 }
 
+/**
+ * 归一化 Markdown，用于判断「内容是否真有变化」。
+ * ima 存储时会重排格式：无序列表 `- ` 变 `* `、表头自动加粗、表格列宽补空格对齐、
+ * 行尾补空白。这些差异不代表用户改了内容，不能因此覆盖本地文件。
+ */
+export function normalizeMarkdown(text) {
+  return String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/^\s*[*+]\s+/gm, "- ")
+    .replace(/^(\|[\s:|-]+\|)$/gm, (line) => line.replace(/-{3,}/g, "---"))
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function semanticallyEqual(a, b) {
+  return normalizeMarkdown(a) === normalizeMarkdown(b);
+}
+
 /** 找出远端有、本地没有的行（按去空白后的行内容比对），保序。 */
 export function newLinesFrom(remoteText, localText) {
   const known = new Set(
@@ -48,8 +68,9 @@ export function mergeRemoteIntoLocal(localContent, remoteContent, opts = {}) {
   const remote = String(remoteContent ?? "");
 
   if (mode === PULL_MODE.MARKDOWN) {
-    const changed = remote !== local;
-    return { content: remote, changed, mode, addedLines: 0 };
+    // 只有语义上确有差异才覆盖本地；纯格式重排（列表符号、表头加粗、列宽）不算改动。
+    const changed = !semanticallyEqual(remote, local);
+    return { content: changed ? remote : local, changed, mode, addedLines: 0 };
   }
 
   const added = newLinesFrom(remote, stripImaAppendix(local));

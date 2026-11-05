@@ -71,12 +71,15 @@ export function loadConfig(overrides = {}) {
     conflictStrategy: overrides.conflictStrategy || file.conflictStrategy || "newest-wins",
     // 全库同步：图片/附件也走文件型上传通道。
     includeBinary: overrides.includeBinary ?? file.includeBinary ?? true,
-    // 回写策略，待 notes-probe 实测后决定默认值（append = 只追加新增行，不覆盖原文）。
-    pullMode: overrides.pullMode || file.pullMode || "append",
+    // 实测（2026-11-05，真实凭证）：get_doc_content 的 target_content_format=1 返回 Markdown，
+    // 0/3 是纯文本、2 是富文本；export_note 端点不存在（404 / 210001）。
+    // 因此默认走 markdown 全文回写，再用 normalizeMarkdown 过滤纯格式重排。
+    pullMode: overrides.pullMode || file.pullMode || "markdown",
     // add_knowledge 的同名替换策略；OpenAPI 侧待验证，失效时自动退回「新建 + 旧条目移回收站」。
     useReplace: overrides.useReplace ?? file.useReplace ?? true,
     recycleFolderId: overrides.recycleFolderId || file.recycleFolderId || "",
-    contentFormat: overrides.contentFormat ?? file.contentFormat ?? 0,
+    // 1 = Markdown（实测唯一保留 # / ## / > / ``` 的取值）。
+    contentFormat: overrides.contentFormat ?? file.contentFormat ?? 1,
     localPollMs: overrides.localPollMs ?? file.localPollMs ?? 1000,
     remotePollMs: overrides.remotePollMs ?? file.remotePollMs ?? 10000,
     // 与旧 note-sync 一致：单文件 90MB 以上才跳过并告警，不做内容级排除。

@@ -37,9 +37,14 @@ async function probeOne(label, endpoint, body, creds, opts = {}) {
     entry.msg = r.msg;
     entry.dataShape = shape(r.data);
     if (opts.inspect) entry.inspect = opts.inspect(r.data, r.raw);
-    if (opts.showContent) {
-      const text = typeof r.data?.content === "string" ? r.data.content : null;
-      entry.contentProbe = text ? { ...detectMarkdown(text), sample: text.slice(0, 300) } : null;
+    // 默认也检测 Markdown 特征（只看标记符号与长度，不落正文），否则无法判断回写保真度。
+    const text = [r.data?.content, r.data?.markdown, r.data?.text, r.data?.doc_content]
+      .find((v) => typeof v === "string") ?? null;
+    if (text) {
+      entry.contentProbe = {
+        ...detectMarkdown(text),
+        sample: opts.showContent ? text.slice(0, 300) : null,
+      };
     }
   } catch (err) {
     entry.error = String(err.message ?? err);
@@ -59,7 +64,11 @@ function notesShape(data, raw) {
     isEnd: data?.is_end ?? null,
     firstItemKeys: first ? Object.keys(first) : [],
     firstInfoKeys: first?.basic_info?.basic_info ? Object.keys(first.basic_info.basic_info) : Object.keys(first?.basic_info ?? {}),
-    firstNoteId: first?.basic_info?.basic_info?.note_id ?? first?.basic_info?.note_id ?? first?.note_id ?? null,
+    firstNoteId: first?.basic_info?.basic_info?.docid
+      ?? first?.basic_info?.basic_info?.note_id
+      ?? first?.basic_info?.docid
+      ?? first?.basic_info?.note_id
+      ?? first?.note_id ?? null,
     firstModifyTime: first?.basic_info?.basic_info?.modify_time ?? first?.basic_info?.modify_time ?? first?.modify_time ?? null,
     rawTopKeys: raw ? Object.keys(raw) : [],
   };
@@ -146,7 +155,7 @@ export async function runProbe(opts = {}) {
       workingListEndpoint: listByFolder.code === 0 ? EP.LIST_NOTE_BY_FOLDER : listNote.code === 0 ? EP.LIST_NOTE : null,
       exportNoteExists: contentProbes.find((r) => r.endpoint === EP.EXPORT_NOTE)?.code === 0,
       contentFormatsOk: formatEntries.filter((r) => r.code === 0).map((r) => r.request.target_content_format),
-      markdownPreservingFormats: showContent ? markdownFormats : "未检测（加 --show-content）",
+      markdownPreservingFormats: markdownFormats,
       note: "REPLACE 策略与 move_knowledge 属于写操作，默认不探测；需显式 --write-probe 且会创建测试条目。",
     },
   };
