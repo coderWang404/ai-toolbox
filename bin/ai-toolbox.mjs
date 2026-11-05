@@ -61,6 +61,9 @@ import {
 } from "../src/today-gateway.mjs";
 import { readFileSync } from "node:fs";
 import { codexConfigPath, codexHome, ccSwitchDbPath } from "../src/paths.mjs";
+import { runProbe, formatProbeSummary } from "../src/notes-sync/probe.mjs";
+import { localStatus, buildPlan, formatPlan } from "../src/notes-sync/plan.mjs";
+import { scanConflicts, summarizeConflicts, formatConflictReport } from "../src/notes-sync/conflicts.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -106,6 +109,10 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox today-launch          以调试端口重启 Today.app（CDP 传输需要）
   ai-toolbox today-serve           启动 Today 的 OpenAI 兼容网关（--port 指定端口）
   ai-toolbox doctor                检查运行环境
+  ai-toolbox notes-status         扫描本地 vault 与同步状态（不联网、只读）
+  ai-toolbox notes-probe          实测 ima OpenAPI 端点能力，输出证据（只读）
+  ai-toolbox notes-plan           预演一轮双向同步会做什么（只读、不落盘）
+  ai-toolbox notes-conflicts      分析百度云冲突副本，判定哪份是最新保留本（只读）
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -880,6 +887,7 @@ async function main() {
       port: { type: "string" },
       host: { type: "string" },
       action: { type: "string" },
+      "show-content": { type: "boolean", default: false },
     },
   });
 
@@ -1086,6 +1094,51 @@ async function main() {
     case "today-serve":
       await cmdTodayServe(opts);
       return;
+    case "notes-status": {
+      const status = localStatus();
+      if (json) {
+        result = { command: "notes-status", ...status };
+      } else {
+        console.log(`vault     ${status.vaultRoot}`);
+        console.log(`全库      ${status.totalFiles} 个文件 / ${status.totalBytes} 字节`);
+        console.log(`  文本    ${status.textFiles}，二进制 ${status.binaryFiles}`);
+        console.log(`已映射    ${status.mapped}，未映射 ${status.unmapped}`);
+        console.log(`state     ${JSON.stringify(status.state)}`);
+        console.log(`目录排除  ${status.excludes.length ? status.excludes.join(", ") : "无（全库同步）"}`);
+        result = null;
+      }
+      break;
+    }
+    case "notes-probe": {
+      const report = await runProbe({ showContent: Boolean(values["show-content"]) });
+      if (json) {
+        result = { command: "notes-probe", ...report };
+      } else {
+        console.log(formatProbeSummary(report));
+        result = null;
+      }
+      break;
+    }
+    case "notes-plan": {
+      const plan = await buildPlan();
+      if (json) {
+        result = { command: "notes-plan", ...plan };
+      } else {
+        console.log(formatPlan(plan));
+        result = null;
+      }
+      break;
+    }
+    case "notes-conflicts": {
+      const items = scanConflicts();
+      if (json) {
+        result = { command: "notes-conflicts", summary: summarizeConflicts(items), items };
+      } else {
+        console.log(formatConflictReport(items));
+        result = null;
+      }
+      break;
+    }
     case "doctor":
       result = cmdDoctor(opts);
       break;
