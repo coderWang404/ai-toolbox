@@ -16,6 +16,7 @@
 | 网络测速 | 出口信息、延迟、上下行测速 |
 | Qoder 网络 | 本机 Qoder CN + 远程机器的 DNS/hosts、Clash、HTTPDNS 状态与管理 |
 | Today | 独立模块：通过 CDP 使用 Today.app，导出 OpenAI 兼容网关 |
+| 笔记同步 | 本机 Obsidian 知识库 ↔ ima 知识库，按路径镜像双向同步 |
 
 - **桌面 App**：`AI 工具箱.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
 - **命令行版**：`ai-toolbox` CLI（适合脚本/终端用户）
@@ -222,6 +223,64 @@ ai-toolbox today-serve --port 8317  # OpenAI 兼容网关
 ```
 
 网关默认要求 `Authorization: Bearer <token>`，token 自动生成在 `~/.ai-toolbox/today-gateway-token`（0600），App 的 Today 页可以直接复制 Base URL / API Key。模型切换是 Today 账号的全局设置，切换后 Today App 里的选择也会变；Agent 调用会进入 Today 的主聊天。
+
+## 笔记同步（ima）
+
+把本机 vault（`~/baidusync/笔记`）和 ima 知识库里的同名文件夹做成**按路径镜像的双向同步**：本地新建、修改、删除都会同步过去，ima 侧被替换的条目也会拉回本地。常驻进程 10 秒一轮。
+
+```bash
+ai-toolbox notes-status                # 本地全库规模与已映射条目（只读、不联网）
+ai-toolbox notes-sync --dry-run        # 预演一轮，看清会做什么
+ai-toolbox notes-sync                  # 真跑一轮
+ai-toolbox notes-remote                # 查看 ima 侧现状（--files N 列出文件）
+ai-toolbox notes-daemon --once         # 只跑一轮常驻循环（--interval 秒）
+```
+
+配置在 `~/.ai-toolbox/notes-sync.json`：
+
+```json
+{
+  "vaultRoot": "/Users/MacBook/baidusync/笔记",
+  "knowledgeBaseName": "个人知识库",
+  "knowledgeBaseId": "ima_kb_RoVtyqfL",
+  "rootPath": "笔记"
+}
+```
+
+`knowledgeBaseName` 是 cgi 侧的名字（个人知识库的 cgi ID 等于 userId），`knowledgeBaseId` 是 OpenAPI 侧的 `ima_kb_xxx`，两套 ID 不通用。`rootPath` 是 vault 根在知识库里对应的文件夹名。
+
+### 为什么整条链路只用文件型条目
+
+ima 有两条写通道，能力不一样：
+
+- **OpenAPI**（`openapi/note|wiki/v1`）：能建笔记、读正文、传文件，但**没有删除、改名、建目录**。
+- **cgi**（`cgi-bin/knowledge_tab_{reader,writer}`，网页端内部接口）：能列树、建目录、删条目、改名、原地替换，还能下发**带签名的下载地址**。
+
+同步全部用**文件型条目**（`media_type=1`），因为：
+
+- 下载回来逐字节保真（实测 606 个文件抽样 sha256 全一致，含 16MB 的 PDF）；
+- note 型会被 ima 服务端规范化 Markdown（`-` → `*`、表头加粗、空行增删），555 字节的原文回读成 750 字节，做双向会无限改写。
+
+代价是 ima App 里不能直接编辑条目正文——这与「手机只读 ima」的用法一致。
+
+### 差异检测
+
+不靠内容 hash 来回拉：每轮先问一次根目录的 `version`，没变就直接复用上一轮的整棵树（1 次请求）；变了才重新爬（71 个目录并发列举约 7 秒）。逐文件用「本地 sha256 / 远端 update_time + media_id / state 基线」三方比对，只有远端 update_time 变了才下载。
+
+`update_time` 是唯一可靠的远端变化信号：`md5_sum` 与本地文件 md5 并不一致（大小相同、哈希不同），不能直接拿来比。
+
+### 踩过的坑
+
+- 小票（IMA-TOKEN）只有 **2 小时**，过期后**所有** cgi 接口都返回 `600001 服务繁忙`，和真限频同一个码。已用 `auth_login/refresh` 自动续期（`refreshToken` 有效期 30 天），续期结果写回 `~/.config/ima/session.json`。
+- `knowledge_base_id` 必须传 cgi 侧 ID（个人知识库 = userId，自建库 = 纯数字）；传 OpenAPI 的 `ima_kb_xxx` 时每个接口都只回同一个 `code 51 参数错误`。
+- 分页 `limit` 上限 20，首屏 `cursor` 必须传空串（传 `"0"` 会 `500011`）。
+- `create_folder` 的 `folder_id` 必须是有效父目录 ID，根目录传知识库自己的 ID，传空串会 51。
+- `replace_knowledge` 是真·原地替换（目录里仍只有一条），但 **media_id 会换成新的**，必须写回 state。
+- `add_knowledge` 只回 `media_id`，没有 `update_time`；新建后要按父目录回查一次补基线，否则下一轮会把自己刚推的那份当成远端变化又拉回来。
+
+### 常驻
+
+`scripts/notes-daemon.sh` + `~/Library/LaunchAgents/com.coderwang404.notes-sync.plist`（`KeepAlive`，重启后自动拉起）。日志在 `~/Library/Logs/notes-sync.log`，只在有动作或错误时写行。
 
 ## 网络测速
 

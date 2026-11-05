@@ -1,37 +1,40 @@
-// 同步引擎：一轮完整的双向同步。client 可注入（本地 mock server 即可跑端到端测试）。
-// 单条失败不中断整轮；所有写操作都经过 state 基线，保证重跑幂等。
+// 同步引擎 v2：按「路径镜像」双向同步整个 vault。
+//
+// 与 v1 的区别：v1 把 ima 当笔记仓库，靠 noteId 平铺 + inbox 落地；
+// v2 直接以相对路径为身份，远端文件夹层级与本地一致（`笔记/life/原则库.md` 对 `life/原则库.md`）。
+//
+// 为什么整条链路都用文件型条目（media_type=1）：
+//   - 文件型下载回来逐字节保真（实测 sha256 与本地一致），能做安全的双向；
+//   - note 型会被 ima 服务端规范化 Markdown，回读长度 555 → 750，往返会无限改写。
+//   ima 侧因此不能直接编辑条目正文 —— 这与「手机只读 ima App」的用法一致。
+//
+// 差异检测不靠内容 hash 往来拉取，而是三方比对：
+//   本地 sha256（每轮扫描算） / 远端 update_time + media_id（一次全树列举） / state 里的基线。
+// 只有「远端 update_time 变了」才下载，所以稳态下一轮同步只有 1 次列表 + 0 次下载。
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.mjs";
 import { dataFile } from "../paths.mjs";
-import {
-  scanVault, sha256, atomicWrite, moveToTrash, titleFor, extOf, mimeFor,
-} from "./vault.mjs";
+import { scanVault, sha256, atomicWrite, moveToTrash, mimeFor } from "./vault.mjs";
 import { loadState, saveState, putRecord, removeRecord } from "./state.mjs";
-import { ImaClient } from "./ima-api.mjs";
-import { decide, Decision, resolveConflict, summarize } from "./reconcile.mjs";
-import {
-  canonicalHash, toIma, mergeRemoteIntoLocal, PULL_MODE, safeName,
-} from "./transform.mjs";
+import { RemoteStore } from "./remote-store.mjs";
+import { Decision, summarize } from "./reconcile.mjs";
 
-const REPLACE = "DUPLICATE_NAME_STRATEGY_REPLACE";
+const dirOf = (relPath) => relPath.split("/").slice(0, -1).join("/");
 
 export class SyncEngine {
   constructor(opts = {}) {
     this.config = opts.config ?? loadConfig();
-    this.client = opts.client ?? new ImaClient(opts.creds);
+    this.store = opts.store ?? new RemoteStore({ config: this.config });
     this.state = opts.state ?? loadState(opts.stateFile);
     this.stateFile = opts.stateFile;
     this.vaultRoot = opts.vaultRoot ?? this.config.vaultRoot;
     this.trashRoot = opts.trashRoot ?? dataFile("notes-sync-trash");
     this.log = opts.log ?? (() => {});
-    this.pullMode = opts.pullMode ?? this.config.pullMode ?? PULL_MODE.APPEND;
-    this.useReplace = opts.useReplace ?? this.config.useReplace ?? true;
-    this.recycleFolderId = opts.recycleFolderId ?? this.config.recycleFolderId ?? "";
-    this.contentFormat = opts.contentFormat ?? this.config.contentFormat ?? 0;
+    // 常驻进程跨轮持有：size+mtime 未变的文件不重复读盘。
+    this.contentCache = opts.contentCache ?? null;
   }
 
-  /** 每完成一个动作就落盘，长任务中途失败也能续传，不用从头再来。 */
   persist() {
     if (!this._dryRun) saveState(this.state, this.stateFile);
   }
@@ -41,31 +44,49 @@ export class SyncEngine {
     this.persist();
   }
 
-  /** @param {{dryRun?:boolean}} opts @returns 一轮同步报告 */
-  async runOnce({ dryRun = false } = {}) {
-    this._dryRun = dryRun;
-    const files = scanVault(this.vaultRoot, this.config);
-    const localByPath = new Map(files.map((f) => [f.path, f]));
-    const notes = await this.client.allNotes();
-    const byNoteId = new Map(notes.filter((n) => n.noteId).map((n) => [n.noteId, n]));
-    const mappedIds = new Set(
-      Object.values(this.state.entries).map((e) => e.noteId).filter(Boolean)
-    );
-    // 推送时 ima 会新建 note（无覆盖更新），旧 note 可能仍出现在列表里。
-    // 按标题去重，避免把自己刚推上去的历史版本当成「ima 新建笔记」拉回 inbox。
-    const mappedTitles = new Set(
-      Object.values(this.state.entries).map((e) => e.title).filter(Boolean)
-    );
+  readBytes(file) {
+    if (file.isText) return Buffer.from(file.content ?? "", "utf8");
+    return readFileSync(path.join(this.vaultRoot, file.path));
+  }
 
+  /** @param {{dryRun?:boolean, verify?:boolean}} opts */
+  async runOnce({ dryRun = false, verify = false } = {}) {
+    this._dryRun = dryRun;
+    const files = scanVault(this.vaultRoot, { ...this.config, contentCache: this.contentCache });
+    const localByPath = new Map(files.map((f) => [f.path, f]));
+    const remote = await this.store.index();
     const actions = [];
     const errors = [];
-    // 本轮刚从 ima 落到 inbox 的文件不在扫描快照里，第 3 步不能把它们误判成「本地已删除」。
-    const createdThisRun = new Set();
+    this._created = [];
 
-    // 1. 本地存在的文件
+    // 1. 目录：本地有、远端没有的先建出来（浅的在前，父目录必须先存在）。
+    const localDirs = new Set();
+    for (const f of files) {
+      const segs = f.path.split("/");
+      segs.pop();
+      let acc = "";
+      for (const s of segs) {
+        acc = acc ? `${acc}/${s}` : s;
+        localDirs.add(acc);
+      }
+    }
+    const missingDirs = [...localDirs]
+      .filter((d) => !remote.dirs.has(d))
+      .sort((a, b) => a.split("/").length - b.split("/").length || (a < b ? -1 : 1));
+    for (const d of missingDirs) {
+      if (dryRun) { actions.push({ path: d, decision: "mkdir", reason: "dry-run" }); continue; }
+      try {
+        await this.store.ensureFolder(d);
+        actions.push({ path: d, decision: "mkdir" });
+      } catch (err) {
+        errors.push({ path: d, message: String(err.message ?? err) });
+      }
+    }
+
+    // 2. 本地每个文件。
     for (const file of files) {
       try {
-        const item = await this.processLocal(file, byNoteId, { dryRun });
+        const item = await this.processLocal(file, remote, { dryRun, verify });
         if (item) actions.push(item);
       } catch (err) {
         errors.push({ path: file.path, message: String(err.message ?? err) });
@@ -73,43 +94,30 @@ export class SyncEngine {
       }
     }
 
-    // 2. ima 里新建、本地没有映射的笔记 → 落到 inbox
-    for (const note of notes) {
-      if (!note.noteId || mappedIds.has(note.noteId) || mappedTitles.has(note.title)) continue;
+    // 3. 远端有、本地没有。
+    for (const [relPath, r] of remote.byPath) {
+      if (localByPath.has(relPath)) continue;
       try {
-        const item = await this.processRemoteNew(note, { dryRun });
-        if (item) {
-          actions.push(item);
-          createdThisRun.add(item.path);
-        }
+        actions.push(await this.handleRemoteOnly(relPath, r, remote, { dryRun }));
       } catch (err) {
-        errors.push({ path: note.title, message: String(err.message ?? err) });
+        errors.push({ path: relPath, message: String(err.message ?? err) });
+        this.log(`  ✗ ${relPath}: ${err.message}`);
       }
     }
 
-    // 3. 本地已删除的文件 → 传播到 ima；ima 里消失的条目 → 清理映射
-    for (const [relPath, rec] of Object.entries(this.state.entries)) {
-      if (createdThisRun.has(relPath)) continue;
-      if (localByPath.has(relPath)) {
-        // 文件被恢复（曾经传播过删除）→ 取消删除标记并清空基线，下一轮重新推送
-        if (rec.deleted && !dryRun) {
-          rec.deleted = false;
-          delete rec.deletedAt;
-          rec.baseLocalHash = null;
-          actions.push({ path: relPath, decision: "restored-locally" });
-        }
-        continue;
-      }
-      if (rec.deleted) continue; // 已传播过，保留墓碑防止被当成 ima 新笔记拉回
-      const remoteNote = rec.noteId ? byNoteId.get(rec.noteId) : null;
-      if (!remoteNote) {
-        if (!dryRun) removeRecord(this.state, relPath);
-        continue;
-      }
+    // 新建条目拿不到 update_time，轮末按目录回查一次补进基线，
+    // 否则下一轮会把「自己刚推的那份」当成远端变化又拉回来。
+    if (!dryRun && this._created.length) {
       try {
-        actions.push(await this.propagateDelete(relPath, rec, remoteNote, { dryRun }));
+        const refreshed = await this.store.refreshEntries(this._created);
+        for (const [relPath, info] of refreshed) {
+          const rec = this.state.entries[relPath];
+          if (!rec) continue;
+          rec.mediaId = info.mediaId;
+          rec.remoteUpdateTime = info.updateTime;
+        }
       } catch (err) {
-        errors.push({ path: relPath, message: String(err.message ?? err) });
+        errors.push({ path: "(refresh)", message: String(err.message ?? err) });
       }
     }
 
@@ -118,278 +126,191 @@ export class SyncEngine {
       at: new Date().toISOString(),
       dryRun,
       localFiles: files.length,
-      remoteNotes: notes.length,
+      remoteFiles: remote.byPath.size,
       counts: summarize(actions.map((a) => a.decision)),
       actions,
       errors,
     };
   }
 
-  async processLocal(file, byNoteId, { dryRun }) {
-    const rec = this.state.entries[file.path] ?? null;
-    const remoteNote = rec?.noteId ? byNoteId.get(rec.noteId) : null;
-    const remoteExists = Boolean(remoteNote);
-    const modifyTime = Number(remoteNote?.modifyTime ?? 0);
-    const dirty = remoteExists && modifyTime > Number(rec?.remoteModifyTime ?? 0);
-
-    // 二进制（图片/附件）：ima 不能在 App 里编辑文件型条目，因此只做本地 → 云端单向推送。
-    if (!file.isText) {
-      const hash = file.hash;
-      if (rec && hash === rec.baseLocalHash) {
-        return { path: file.path, decision: Decision.NOOP, reason: "binary-unchanged" };
-      }
-      return this.pushBinary(file, rec, { dryRun });
+  async processLocal(file, remote, { dryRun, verify }) {
+    const relPath = file.path;
+    if (!mimeFor(relPath)) {
+      return { path: relPath, decision: "skip", reason: "ima 不支持的扩展名" };
     }
 
-    const localHash = canonicalHash(file.content ?? "");
-    let remoteHash = rec?.baseRemoteHash ?? rec?.remoteHash ?? null;
-    let remoteText = null;
-    if (dirty && rec?.noteId) {
-      const data = await this.client.getDocContent(rec.noteId, this.contentFormat);
-      remoteText = String(data?.content ?? "");
-      remoteHash = sha256(Buffer.from(remoteText, "utf8"));
-    }
+    const rec = this.state.entries[relPath] ?? null;
+    const r = remote.byPath.get(relPath) ?? null;
+    const localHash = file.hash;
 
-    let decision = decide({
-      localExists: true,
-      localHash,
-      remoteExists,
-      remoteHash,
-      baseHash: rec?.baseLocalHash ?? rec?.baseHash ?? null,
-      baseLocalHash: rec?.baseLocalHash ?? rec?.baseHash ?? null,
-      baseRemoteHash: rec?.baseRemoteHash ?? rec?.baseHash ?? null,
-      hadRecord: Boolean(rec),
-    });
-
-    if (decision === Decision.CONFLICT) {
-      // 用户要求：不要冲突版本，以最新的为准。
-      const resolved = resolveConflict({
-        localMtimeMs: file.mtimeMs,
-        remoteModifyTimeMs: modifyTime,
-        localHash,
-        remoteHash,
-        strategy: this.config.conflictStrategy,
-      });
-      decision = resolved === "conflict-copy" ? Decision.CONFLICT : resolved;
-    }
-
-    if (decision === Decision.NOOP) {
-      // 时间戳推进但不改内容时，也要刷新远端基线，避免下轮重复拉取。
-      if (!dryRun && dirty && rec) {
-        this.persistRecord( file.path, {
-          ...rec, remoteModifyTime: modifyTime, baseRemoteHash: remoteHash,
-        });
-      }
-      return { path: file.path, decision, reason: dirty ? "remote-touched-only" : "in-sync" };
-    }
-
-    if (decision === Decision.PUSH || decision === Decision.CREATE_REMOTE) {
-      return this.pushText(file, rec, modifyTime, { dryRun });
-    }
-
-    if (decision === Decision.PULL) {
-      if (remoteText === null && rec?.noteId) {
-        const data = await this.client.getDocContent(rec.noteId, this.contentFormat);
-        remoteText = String(data?.content ?? "");
-        remoteHash = sha256(Buffer.from(remoteText, "utf8"));
-      }
-      return this.pullText(file, rec, remoteText, remoteHash, modifyTime, { dryRun });
-    }
-
-    return { path: file.path, decision, reason: "no-action" };
-  }
-
-  async pushText(file, rec, modifyTime, { dryRun }) {
-    const content = toIma(file.content ?? "");
-    const title = titleFor(file.path);
-    if (dryRun) return { path: file.path, decision: rec ? Decision.PUSH : Decision.CREATE_REMOTE, reason: "dry-run" };
-
-    const imported = await this.client.importDoc(content, { folderId: this.config.folderId || undefined });
-    const noteId = imported?.note_id ?? imported?.noteId;
-    if (!noteId) throw new Error("import_doc 未返回 note_id");
-
-    const added = await this.client.addKnowledge({
-      noteId,
-      title,
-      knowledgeBaseId: this.config.knowledgeBaseId,
-      folderId: this.config.folderId || undefined,
-      duplicateNameStrategy: this.useReplace ? REPLACE : undefined,
-    });
-
-    // 未启用 REPLACE 时才需要把旧条目挪进回收站（REPLACE 由服务端按同名替换）。
-    if (!this.useReplace && rec?.mediaId && this.recycleFolderId) {
-      try {
-        await this.client.moveKnowledge({
-          mediaId: rec.mediaId,
-          knowledgeBaseId: this.config.knowledgeBaseId,
-          targetFolderId: this.recycleFolderId,
-        });
-      } catch (err) {
-        this.log(`  ! 旧条目移入回收站失败（不影响新版本）: ${err.message}`);
-      }
-    }
-
-    const baseLocalHash = sha256(Buffer.from(content, "utf8"));
-    // 推送后回读一次：ima 会把 Markdown 规范化（- → *、表头加粗、表格列宽对齐），
-    // 远端实际内容与推送原文并不逐字节相同。不记录真实远端 hash 的话，
-    // 下一轮会一直判定「远端改过」，形成无休止的回写。
-    let baseRemoteHash = baseLocalHash;
-    try {
-      const back = await this.client.getDocContent(noteId, this.contentFormat);
-      baseRemoteHash = sha256(Buffer.from(String(back?.content ?? ""), "utf8"));
-    } catch (err) {
-      this.log(`  ! 推送后回读失败，下一轮会再校准: ${err.message}`);
-    }
-    this.persistRecord( file.path, {
-      title, noteId, mediaId: added?.media_id ?? rec?.mediaId ?? null,
-      kbId: this.config.knowledgeBaseId,
-      baseLocalHash,
-      baseRemoteHash,
-      remoteModifyTime: modifyTime || Date.now(),
-      lastSyncAt: Date.now(),
-      lastLocalMtimeMs: file.mtimeMs,
-    });
-    return { path: file.path, decision: rec ? Decision.PUSH : Decision.CREATE_REMOTE, noteId };
-  }
-
-  async pullText(file, rec, remoteText, remoteHash, modifyTime, { dryRun }) {
-    const merged = mergeRemoteIntoLocal(file.content ?? "", remoteText ?? "", {
-      mode: this.pullMode,
-      stamp: new Date().toISOString().slice(0, 16).replace("T", " "),
-    });
-    if (dryRun) return { path: file.path, decision: Decision.PULL, reason: "dry-run", changed: merged.changed };
-
-    const full = path.join(this.vaultRoot, file.path);
-    if (merged.changed) atomicWrite(full, merged.content, 0o600);
-    const baseLocalHash = canonicalHash(merged.content);
-    this.persistRecord( file.path, {
-      ...(rec ?? { title: titleFor(file.path), noteId: null, mediaId: null }),
-      kbId: this.config.knowledgeBaseId,
-      baseLocalHash,
-      baseRemoteHash: remoteHash,
-      remoteModifyTime: modifyTime || Date.now(),
-      lastSyncAt: Date.now(),
-      lastLocalMtimeMs: existsSync(full) ? undefined : rec?.lastLocalMtimeMs,
-    });
-    return {
-      path: file.path, decision: Decision.PULL, changed: merged.changed,
-      addedLines: merged.addedLines, mode: merged.mode,
-    };
-  }
-
-  async pushBinary(file, rec, { dryRun }) {
-    const title = file.path.split("/").pop();
-    if (dryRun) return { path: file.path, decision: Decision.PUSH, reason: "dry-run-binary" };
-    const bytes = readFileSync(path.join(this.vaultRoot, file.path));
-    const created = await this.client.createMedia({
-      fileName: title,
-      fileSize: bytes.length,
-      contentType: mimeFor(file.path),
-      fileExt: extOf(file.path),
-      knowledgeBaseId: this.config.knowledgeBaseId,
-    });
-    if (created?.upload_url?.presigned_url) {
-      await this.client.uploadBinary(created.upload_url, bytes);
-    } else if (created?.cos_credential) {
-      // 实测返回的是 COS 临时凭证而不是预签名 URL。
-      await this.client.uploadToCos(created.cos_credential, bytes, mimeFor(file.path));
-    } else {
-      throw new Error("create_media 既没返回 presigned_url 也没返回 cos_credential");
-    }
-    await this.client.addKnowledgeByMedia({
-      mediaId: created?.media_id ?? created?.mediaId,
-      title,
-      knowledgeBaseId: this.config.knowledgeBaseId,
-      folderId: this.config.folderId || undefined,
-      duplicateNameStrategy: this.useReplace ? REPLACE : undefined,
-    });
-    this.persistRecord( file.path, {
-      title, noteId: null, mediaId: created?.media_id ?? null,
-      kbId: this.config.knowledgeBaseId,
-      baseLocalHash: file.hash, baseRemoteHash: file.hash,
-      remoteModifyTime: Date.now(), lastSyncAt: Date.now(),
-      lastLocalMtimeMs: file.mtimeMs,
-    });
-    return { path: file.path, decision: Decision.PUSH, kind: "binary" };
-  }
-
-  /**
-   * 本地删除传播到 ima。ima 没有删除接口（delete_knowledge 是 404），
-   * 只能把知识库条目 move 进「回收站」文件夹；note 本体删不掉，
-   * 所以 state 里保留 deleted 墓碑，避免下一轮把它当成「ima 新建笔记」拉回本地。
-   * 若删除后远端又被改过，按 newest-wins 恢复本地文件。
-   */
-  async propagateDelete(relPath, rec, remoteNote, { dryRun }) {
-    const remoteModified = Number(remoteNote.modifyTime ?? 0);
-    // 判断「远端在我们上次同步后是否又改过」不能用时钟对时钟（两端时钟不同源，
-    // 服务端 modify_time 常比本地 Date.now() 超前）。用内容 hash 比最可靠。
-    let remoteChanged = false;
-    if (rec.noteId && rec.baseRemoteHash) {
+    // ---- 远端没有：新建 ----
+    if (!r) {
       if (dryRun) {
-        remoteChanged = remoteModified > Number(rec.remoteModifyTime ?? 0);
-      } else {
-        const probe = await this.client.getDocContent(rec.noteId, this.contentFormat);
-        const probeText = String(probe?.content ?? "");
-        remoteChanged = sha256(Buffer.from(probeText, "utf8")) !== rec.baseRemoteHash;
+        return { path: relPath, decision: rec ? Decision.PUSH : Decision.CREATE_REMOTE, reason: "dry-run" };
       }
-    }
-
-    if (remoteChanged) {
-      if (dryRun) return { path: relPath, decision: "restore-from-remote", reason: "dry-run" };
-      const data = await this.client.getDocContent(rec.noteId, this.contentFormat);
-      const text = String(data?.content ?? "");
-      atomicWrite(path.join(this.vaultRoot, relPath), text, 0o600);
-      this.persistRecord( relPath, {
-        ...rec,
-        deleted: false,
-        deletedAt: undefined,
-        baseLocalHash: canonicalHash(text),
-        baseRemoteHash: sha256(Buffer.from(text, "utf8")),
-        remoteModifyTime: remoteModified,
+      const bytes = this.readBytes(file);
+      const upload = await this.store.upload({ relPath, bytes });
+      const folderId = await this.store.ensureFolder(dirOf(relPath));
+      const mediaId = await this.store.add({ relPath, upload, folderId });
+      this.persistRecord(relPath, {
+        mediaId,
+        fileSize: bytes.length,
+        baseLocalHash: localHash,
+        // 0 = 还没问到服务端这次给的 update_time；本轮回查后补上（见 runOnce 末尾）。
+        remoteUpdateTime: 0,
         lastSyncAt: Date.now(),
       });
-      return { path: relPath, decision: "restore-from-remote" };
+      this._created.push(relPath);
+      return { path: relPath, decision: rec ? Decision.PUSH : Decision.CREATE_REMOTE, mediaId };
     }
 
-    if (!this.recycleFolderId) {
-      return {
-        path: relPath, decision: Decision.LOCAL_DELETED,
-        reason: "未配置回收站文件夹，删除未传播到 ima",
-      };
+    // ---- 首次见到这个路径：先用大小粗筛，避免为 600 个文件各下载一次 ----
+    if (!rec) {
+      if (r.fileSize === file.size && !verify) {
+        this.persistRecord(relPath, {
+          mediaId: r.mediaId,
+          fileSize: r.fileSize,
+          baseLocalHash: localHash,
+          remoteUpdateTime: r.updateTime,
+          lastSyncAt: Date.now(),
+        });
+        return { path: relPath, decision: Decision.NOOP, reason: "adopted-by-size" };
+      }
+      const bytes = await this.store.download(r.mediaId);
+      if (sha256(bytes) === localHash) {
+        this.persistRecord(relPath, {
+          mediaId: r.mediaId,
+          fileSize: bytes.length,
+          baseLocalHash: localHash,
+          remoteUpdateTime: r.updateTime,
+          lastSyncAt: Date.now(),
+        });
+        return { path: relPath, decision: Decision.NOOP, reason: "adopted-by-hash" };
+      }
+      // 内容确实不同：谁新听谁的。
+      const useRemote = Number(r.updateTime) > Number(file.mtimeMs);
+      if (dryRun) {
+        return { path: relPath, decision: useRemote ? Decision.PULL : Decision.PUSH, reason: "dry-run-no-baseline" };
+      }
+      // 首次没有基线但本地更新：直接以远端现有条目的 mediaId 为替换目标。
+      return useRemote
+        ? this.pullBytes(file, r, bytes, { dryRun })
+        : this.pushFile(file, rec ?? { mediaId: r.mediaId }, { dryRun });
     }
-    if (dryRun) return { path: relPath, decision: Decision.LOCAL_DELETED, reason: "dry-run" };
 
-    if (rec.mediaId) {
-      await this.client.moveKnowledge({
-        mediaId: rec.mediaId,
-        knowledgeBaseId: this.config.knowledgeBaseId,
-        targetFolderId: this.recycleFolderId,
-      });
+    const localChanged = rec.baseLocalHash !== localHash;
+    // remoteUpdateTime = 0 表示「我们推完之后还没问过服务端这次给的 update_time」，
+    // 必须当成「可能变了」去下载校验一次，否则无法区分远端那点变化是不是自己刚推的。
+    const remoteKnown = Number(rec.remoteUpdateTime ?? 0) > 0;
+    const remoteChanged = r.mediaId !== rec.mediaId || !remoteKnown
+      || Number(r.updateTime) > Number(rec.remoteUpdateTime);
+
+    if (!localChanged && !remoteChanged) {
+      return { path: relPath, decision: Decision.NOOP, reason: "in-sync" };
     }
-    this.persistRecord( relPath, { ...rec, deleted: true, deletedAt: Date.now() });
-    return { path: relPath, decision: Decision.LOCAL_DELETED, movedToRecycle: Boolean(rec.mediaId) };
+    if (localChanged && !remoteChanged) {
+      if (dryRun) return { path: relPath, decision: Decision.PUSH, reason: "dry-run" };
+      return this.pushFile(file, rec, { dryRun });
+    }
+
+    // 远端变了（或两端都变）：必须下载才知道真实内容。
+    const bytes = await this.store.download(r.mediaId);
+    if (sha256(bytes) === localHash) {
+      // 内容其实一致（例如远端只是被重命名/替换成同一份），只刷新基线。
+      if (!dryRun) {
+        this.persistRecord(relPath, {
+          ...rec,
+          mediaId: r.mediaId,
+          fileSize: r.fileSize,
+          remoteUpdateTime: r.updateTime,
+          lastSyncAt: Date.now(),
+        });
+      }
+      return { path: relPath, decision: Decision.NOOP, reason: "remote-touched-only" };
+    }
+    if (!localChanged) {
+      return this.pullBytes(file, r, bytes, { dryRun });
+    }
+
+    // 两端都改过。基线未知时先认为「远端那次变化就是我们上一轮推的」，以本地为准，
+    // 否则推送完的下一轮会被自己的版本反拉回去（远端 update_time 必然晚于本地 mtime）。
+    if (!remoteKnown) {
+      if (dryRun) return { path: relPath, decision: Decision.PUSH, reason: "dry-run-after-push" };
+      return this.pushFile(file, rec, { dryRun });
+    }
+    // 有可靠基线：newest-wins，不生成冲突副本（用户明确要求）。
+    const useRemote = Number(r.updateTime) > Number(file.mtimeMs);
+    if (dryRun) {
+      return { path: relPath, decision: useRemote ? Decision.PULL : Decision.PUSH, reason: "dry-run-conflict" };
+    }
+    return useRemote
+      ? this.pullBytes(file, r, bytes, { dryRun })
+      : this.pushFile(file, rec, { dryRun });
   }
 
-  async processRemoteNew(note, { dryRun }) {
-    const relPath = `${this.config.inboxDir}/${safeName(note.title)}.md`;
-    if (dryRun) return { path: relPath, decision: Decision.CREATE_LOCAL, reason: "dry-run" };
-    if (existsSync(path.join(this.vaultRoot, relPath))) {
-      return { path: relPath, decision: Decision.NOOP, reason: "inbox-file-exists" };
-    }
-    const data = await this.client.getDocContent(note.noteId, this.contentFormat);
-    const remoteText = String(data?.content ?? "");
-    const merged = mergeRemoteIntoLocal("", remoteText, {
-      mode: PULL_MODE.MARKDOWN,
+  async pushFile(file, rec, { dryRun }) {
+    const relPath = file.path;
+    const bytes = this.readBytes(file);
+    const upload = await this.store.upload({ relPath, bytes });
+    const folderId = await this.store.ensureFolder(dirOf(relPath));
+    const replaced = await this.store.replace({
+      relPath, originMediaId: rec.mediaId, upload, folderId,
     });
-    atomicWrite(path.join(this.vaultRoot, relPath), merged.content, 0o600);
-    this.persistRecord( relPath, {
-      title: note.title, noteId: note.noteId, mediaId: null,
-      kbId: this.config.knowledgeBaseId,
-      baseLocalHash: canonicalHash(merged.content),
-      baseRemoteHash: sha256(Buffer.from(remoteText, "utf8")),
-      remoteModifyTime: note.modifyTime,
+    this.persistRecord(relPath, {
+      ...rec,
+      mediaId: replaced.mediaId,
+      fileSize: bytes.length,
+      baseLocalHash: file.hash,
+      remoteUpdateTime: replaced.updateTime,
       lastSyncAt: Date.now(),
     });
-    return { path: relPath, decision: Decision.CREATE_LOCAL, noteId: note.noteId };
+    return { path: relPath, decision: Decision.PUSH, mediaId: replaced.mediaId };
+  }
+
+  async pullBytes(file, r, bytes, { dryRun }) {
+    const relPath = file.path;
+    if (dryRun) return { path: relPath, decision: Decision.PULL, reason: "dry-run" };
+    const full = path.join(this.vaultRoot, relPath);
+    if (this.config.backupBeforePull !== false && existsSync(full)) {
+      moveToTrash(this.vaultRoot, this.trashRoot, relPath);
+    }
+    atomicWrite(full, bytes, 0o600);
+    this.persistRecord(relPath, {
+      mediaId: r.mediaId,
+      fileSize: bytes.length,
+      baseLocalHash: sha256(bytes),
+      remoteUpdateTime: r.updateTime,
+      lastSyncAt: Date.now(),
+    });
+    return { path: relPath, decision: Decision.PULL, bytes: bytes.length };
+  }
+
+  async handleRemoteOnly(relPath, r, remote, { dryRun }) {
+    const rec = this.state.entries[relPath] ?? null;
+
+    // 以前同步过、现在本地没了 → 本地删除，传播到 ima。
+    if (rec) {
+      if (dryRun) return { path: relPath, decision: Decision.LOCAL_DELETED, reason: "dry-run" };
+      const result = await this.store.remove([relPath], remote);
+      if (result.fail.length) {
+        return { path: relPath, decision: Decision.LOCAL_DELETED, failed: result.fail };
+      }
+      removeRecord(this.state, relPath);
+      this.persist();
+      return { path: relPath, decision: Decision.LOCAL_DELETED, removed: result.removed.length };
+    }
+
+    // 从没同步过的远端条目 → 拉到本地。
+    if (dryRun) return { path: relPath, decision: Decision.CREATE_LOCAL, reason: "dry-run" };
+    const bytes = await this.store.download(r.mediaId);
+    atomicWrite(path.join(this.vaultRoot, relPath), bytes, 0o600);
+    this.persistRecord(relPath, {
+      mediaId: r.mediaId,
+      fileSize: bytes.length,
+      baseLocalHash: sha256(bytes),
+      remoteUpdateTime: r.updateTime,
+      lastSyncAt: Date.now(),
+    });
+    return { path: relPath, decision: Decision.CREATE_LOCAL, bytes: bytes.length };
   }
 }

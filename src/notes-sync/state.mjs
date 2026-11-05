@@ -38,9 +38,9 @@ export function saveState(state, file = statePath()) {
   return payload;
 }
 
-/** 一条映射记录的字段说明见 README 之外的代码注释：
- * path, title, noteId, mediaId, kbId, baseHash, remoteHash,
- * remoteModifyTime, lastSyncAt, lastLocalMtimeMs
+/** 一条映射记录的字段（v2 路径镜像）：
+ * path, mediaId, fileSize, baseLocalHash, remoteUpdateTime, lastSyncAt
+ * v1 的 noteId / baseHash / remoteHash / remoteModifyTime 已不再写入。
  */
 export function recordFor(state, relPath) {
   return state.entries[relPath] ?? null;
@@ -58,8 +58,8 @@ export function statsOf(state) {
   const entries = Object.values(state.entries);
   return {
     total: entries.length,
-    withNoteId: entries.filter((e) => e.noteId).length,
-    withBaseHash: entries.filter((e) => e.baseHash).length,
+    withMediaId: entries.filter((e) => e.mediaId).length,
+    withBaseHash: entries.filter((e) => e.baseLocalHash).length,
     lastSyncAt: entries.reduce((max, e) => Math.max(max, e.lastSyncAt ?? 0), 0),
   };
 }

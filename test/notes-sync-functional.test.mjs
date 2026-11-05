@@ -1,4 +1,4 @@
-// 功能测试：本地 mock IMA 跑通同步引擎全链路 + 真实 HTTP mock 验证 API 层。
+// 功能测试：本地 mock 远端跑通「路径镜像 + 逐字节」同步 + 真实 HTTP mock 验证 API 层。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, utimesSync, rmSync } from "node:fs";
@@ -6,22 +6,21 @@ import path from "node:path";
 import { SyncEngine } from "../src/notes-sync/engine.mjs";
 import { ImaClient, rawCall, setBaseUrl } from "../src/notes-sync/ima-api.mjs";
 import { loadState } from "../src/notes-sync/state.mjs";
-import {
-  MockImaClient, startMockHttpServer, makeTempVault, makeEngineOpts, TEST_KB,
-} from "./helpers/mock-ima.mjs";
+import { MockRemoteStore } from "./helpers/mock-remote.mjs";
+import { startMockHttpServer, makeTempVault, makeEngineOpts } from "./helpers/mock-ima.mjs";
 
 function setup(files = {}, overrides = {}) {
-  const client = new MockImaClient();
+  const store = new MockRemoteStore();
   const vault = makeTempVault(files);
-  const { opts, cleanup } = makeEngineOpts(client, vault, overrides);
+  const { opts, cleanup } = makeEngineOpts(store, vault, overrides);
   return {
-    client, vault, opts,
+    store, vault, opts,
     engine: () => new SyncEngine(opts),
     cleanup: () => { cleanup(); vault.cleanup(); },
   };
 }
 
-test("首次同步全库、第二次完全幂等（life/ 与 image/ 不再被排除）", async () => {
+test("首次同步：全库按相对路径镜像到远端，第二次完全幂等", async () => {
   const s = setup({
     "学习笔记/a.md": "# A\n\n内容 A\n",
     "life/原则库.md": "# 原则\n\n私密内容\n",
@@ -29,117 +28,108 @@ test("首次同步全库、第二次完全幂等（life/ 与 image/ 不再被排
   });
   try {
     const r1 = await s.engine().runOnce();
-    assert.equal(r1.counts["create-remote"], 2);
-    assert.equal(r1.counts.push, 1, "二进制走 push");
-    assert.equal(r1.errors.length, 0);
-    assert.equal(s.client.kb.size, 3);
-    assert.equal(s.client.notes.size, 2);
-    assert.equal(s.client.uploads.size, 1, "图片已上传");
+    assert.equal(r1.errors.length, 0, JSON.stringify(r1.errors));
+    assert.equal(r1.counts["create-remote"], 3, JSON.stringify(r1.counts));
+    assert.deepEqual(s.store.remotePaths(), ["image/x.png", "life/原则库.md", "学习笔记/a.md"]);
+    assert.equal(s.store.dirs.has("学习笔记"), true, "远端应建出同名目录");
+    assert.equal(s.store.remoteBytes("image/x.png").toString(), "PNG-BYTES", "二进制逐字节保真");
 
     const r2 = await s.engine().runOnce();
-    const active = Object.keys(r2.counts).filter((k) => k !== "noop");
-    assert.deepEqual(active, [], `第二次不应有动作，实际 ${JSON.stringify(r2.counts)}`);
-    assert.equal(r2.errors.length, 0);
+    assert.deepEqual(
+      Object.keys(r2.counts).filter((k) => k !== "noop"), [],
+      `第二次不应有动作，实际 ${JSON.stringify(r2.counts)}`
+    );
   } finally {
     s.cleanup();
   }
 });
 
-test("本地改动 → push，ima 侧内容同步更新", async () => {
+test("本地改动 → push，远端内容同步更新", async () => {
   const s = setup({ "a.md": "# A\n\n旧内容\n" });
   try {
     await s.engine().runOnce();
     writeFileSync(path.join(s.vault.root, "a.md"), "# A\n\n新内容\n");
     const r = await s.engine().runOnce();
-    assert.equal(r.counts.push, 1);
-    const newRec = loadState(s.opts.stateFile).entries["a.md"];
-    assert.match(s.client.notes.get(newRec.noteId).content, /新内容/);
+    assert.equal(r.counts.push, 1, JSON.stringify(r.counts));
+    assert.equal(s.store.remoteBytes("a.md").toString(), "# A\n\n新内容\n");
     assert.equal(r.errors.length, 0);
   } finally {
     s.cleanup();
   }
 });
 
-test("ima 里编辑 → 回写本地，原文不丢、只追加补记块", async () => {
+test("远端改动 → pull 覆盖本地，旧版本进回收站且不留冲突副本", async () => {
   const s = setup({ "a.md": "# A\n\n本地原文\n" });
   try {
     await s.engine().runOnce();
-    const rec = loadState(s.opts.stateFile).entries["a.md"];
-    s.client.editInIma(rec.noteId, "# A\n\n本地原文\n\n在 ima 里补的一行\n");
+    s.store.editRemote("a.md", "# A\n\n远端改的\n");
     const r = await s.engine().runOnce();
     assert.equal(r.counts.pull, 1, JSON.stringify(r.counts));
     const text = readFileSync(path.join(s.vault.root, "a.md"), "utf8");
-    assert.match(text, /本地原文/);
-    assert.match(text, /## ima 补记/);
-    assert.match(text, /在 ima 里补的一行/);
-    assert.equal(r.actions.find((a) => a.decision === "pull").addedLines > 0, true);
+    assert.equal(text, "# A\n\n远端改的\n");
+    assert.doesNotMatch(text, /note-conflict|冲突副本/);
+    assert.equal(existsSync(s.opts.trashRoot), true, "被覆盖的本地版本应进回收站");
   } finally {
     s.cleanup();
   }
 });
 
-test("回写后不会形成推拉死循环（canonicalHash 不漂移）", async () => {
+test("回写后不会形成推拉死循环", async () => {
   const s = setup({ "a.md": "# A\n\n原文\n" });
   try {
     await s.engine().runOnce();
-    const rec = loadState(s.opts.stateFile).entries["a.md"];
-    s.client.editInIma(rec.noteId, "# A\n\n原文\n\n补记\n");
+    s.store.editRemote("a.md", "# A\n\n原文\n\n补记\n");
     await s.engine().runOnce(); // pull
-    const callsBefore = s.client.calls.importDoc;
+    const before = s.store.calls.replace + s.store.calls.upload;
     const r = await s.engine().runOnce();
-    assert.equal(s.client.calls.importDoc, callsBefore, "不应重复推送");
+    assert.equal(s.store.calls.replace + s.store.calls.upload, before, "不应重复上传");
     assert.deepEqual(Object.keys(r.counts).filter((k) => k !== "noop"), []);
   } finally {
     s.cleanup();
   }
 });
 
-test("两端都改 → newest-wins，不生成任何冲突副本", async () => {
+test("两端都改 → newest-wins，远端更新时远端胜出", async () => {
   const s = setup({ "a.md": "# A\n\n原文\n" });
   try {
     await s.engine().runOnce();
-    const rec = loadState(s.opts.stateFile).entries["a.md"];
-    s.client.editInIma(rec.noteId, "# A\n\n原文\n\n远端赢\n");
-    // 本地 mtime 明确设为更早，远端应胜出
+    s.store.editRemote("a.md", "# A\n\n原文\n\n远端赢\n");
     const full = path.join(s.vault.root, "a.md");
     writeFileSync(full, "# A\n\n原文\n\n本地输\n");
     const past = new Date(Date.now() - 60_000);
-    utimesSync(full, past, past); // 本地明确更旧，远端应胜出
+    utimesSync(full, past, past);
     const r = await s.engine().runOnce();
-    assert.ok(r.counts.pull >= 1, `期望远端胜出，实际 ${JSON.stringify(r.counts)}`);
-    const text = readFileSync(full, "utf8");
-    assert.doesNotMatch(text, /note-conflict|冲突副本/);
-    assert.match(text, /远端赢/);
-    assert.equal(existsSync(path.join(s.vault.root, "a (note-conflict 2026-01-01 000000).md")), false);
+    assert.equal(r.counts.pull, 1, JSON.stringify(r.counts));
+    assert.match(readFileSync(full, "utf8"), /远端赢/);
   } finally {
     s.cleanup();
   }
 });
 
-test("ima 里新建的笔记 → 落到 inbox，并登记映射", async () => {
-  const s = setup({ "a.md": "# A\n" });
+test("两端都改 → 本地 mtime 更新时本地胜出", async () => {
+  const s = setup({ "a.md": "# A\n\n原文\n" });
   try {
     await s.engine().runOnce();
-    const data = await s.client.importDoc("# 手机随手记\n\n在 ima App 里写的\n");
-    const added = await s.client.addKnowledge({ noteId: data.note_id, title: "手机随手记" });
-    assert.ok(added.media_id);
+    s.store.editRemote("a.md", "# A\n\n原文\n\n远端输\n");
+    const full = path.join(s.vault.root, "a.md");
+    writeFileSync(full, "# A\n\n原文\n\n本地赢\n");
+    const future = new Date(Date.now() + 600_000);
+    utimesSync(full, future, future);
     const r = await s.engine().runOnce();
-    assert.equal(r.counts["create-local"], 1, JSON.stringify(r.counts));
-    const target = path.join(s.vault.root, "ima-inbox", "手机随手记.md");
-    assert.equal(existsSync(target), true);
-    assert.match(readFileSync(target, "utf8"), /在 ima App 里写的/);
+    assert.equal(r.counts.push, 1, JSON.stringify(r.counts));
+    assert.match(s.store.remoteBytes("a.md").toString(), /本地赢/);
   } finally {
     s.cleanup();
   }
 });
 
-test("dry-run 不写本地、不写 ima、不改 state", async () => {
+test("dry-run 不写本地、不上传、不改 state", async () => {
   const s = setup({ "a.md": "# A\n" });
   try {
     const r = await s.engine().runOnce({ dryRun: true });
     assert.equal(r.dryRun, true);
-    assert.equal(s.client.calls.importDoc, 0);
-    assert.equal(s.client.calls.addKnowledge, 0);
+    assert.equal(s.store.calls.upload, 0);
+    assert.equal(s.store.calls.add, 0);
     assert.equal(Object.keys(loadState(s.opts.stateFile).entries).length, 0);
   } finally {
     s.cleanup();
@@ -158,41 +148,64 @@ test("全库同步：不排除任何内容目录，只过滤技术噪声", async
   try {
     const r = await s.engine().runOnce();
     assert.equal(r.localFiles, 3, `应扫到 3 个有效文件，实际 ${r.localFiles}`);
-    assert.equal(s.client.kb.size, 3);
+    assert.equal(s.store.remotePaths().length, 3);
   } finally {
     s.cleanup();
   }
 });
 
-test("本地删除传播到 ima 回收站，且不会被当成 ima 新笔记拉回", async () => {
-  const s = setup({ "a.md": "# A\n\n内容\n" }, { config: { recycleFolderId: "folder_recycle" } });
+test("本地删除传播到远端，删完不会被拉回", async () => {
+  const s = setup({ "a.md": "# A\n\n内容\n" });
   try {
     await s.engine().runOnce();
     rmSync(path.join(s.vault.root, "a.md"));
     const r = await s.engine().runOnce();
     assert.equal(r.counts["local-deleted"], 1, JSON.stringify(r.counts));
-    assert.equal(s.client.calls.moveKnowledge, 1, "应把条目移进回收站");
-    assert.equal(loadState(s.opts.stateFile).entries["a.md"].deleted, true);
+    assert.equal(s.store.remotePaths().includes("a.md"), false);
+    assert.equal(loadState(s.opts.stateFile).entries["a.md"], undefined);
 
     const r2 = await s.engine().runOnce();
-    assert.equal(r2.counts["create-local"] ?? 0, 0, "不能把已删的 note 拉回来");
+    assert.equal(r2.counts["create-local"] ?? 0, 0, "不能把已删条目拉回来");
     assert.equal(existsSync(path.join(s.vault.root, "a.md")), false);
-    assert.equal(s.client.calls.moveKnowledge, 1, "墓碑生效，不重复移动");
   } finally {
     s.cleanup();
   }
 });
 
-test("未配置回收站文件夹时，删除只报告、不误动云端", async () => {
+test("远端新增条目 → 落到本地同路径", async () => {
   const s = setup({ "a.md": "# A\n" });
   try {
     await s.engine().runOnce();
-    rmSync(path.join(s.vault.root, "a.md"));
+    s.store.putRemote("学习笔记/新笔记.md", "# 新\n\n远端写的\n");
     const r = await s.engine().runOnce();
-    const action = r.actions.find((a) => a.decision === "local-deleted");
-    assert.ok(action, JSON.stringify(r.counts));
-    assert.match(action.reason, /未配置回收站文件夹/);
-    assert.equal(s.client.calls.moveKnowledge, 0);
+    assert.equal(r.counts["create-local"], 1, JSON.stringify(r.counts));
+    const target = path.join(s.vault.root, "学习笔记/新笔记.md");
+    assert.equal(existsSync(target), true);
+    assert.match(readFileSync(target, "utf8"), /远端写的/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("远端被替换成相同内容时只刷新基线，不覆盖本地", async () => {
+  const s = setup({ "a.md": "# A\n\n内容\n" });
+  try {
+    await s.engine().runOnce();
+    s.store.editRemote("a.md", "# A\n\n内容\n");
+    const r = await s.engine().runOnce();
+    assert.equal(r.counts.pull ?? 0, 0, JSON.stringify(r.counts));
+    const action = r.actions.find((a) => a.path === "a.md");
+    assert.match(action.reason ?? "", /remote-touched-only/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("本地新建目录会在远端逐级补出来", async () => {
+  const s = setup({ "a/深/层/x.md": "# x\n" });
+  try {
+    await s.engine().runOnce();
+    assert.deepEqual([...s.store.dirs.keys()].sort(), ["", "a", "a/深", "a/深/层"]);
   } finally {
     s.cleanup();
   }

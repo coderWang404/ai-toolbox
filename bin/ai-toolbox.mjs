@@ -66,6 +66,7 @@ import { localStatus, buildPlan, formatPlan } from "../src/notes-sync/plan.mjs";
 import { scanConflicts, summarizeConflicts, formatConflictReport } from "../src/notes-sync/conflicts.mjs";
 import { SyncEngine } from "../src/notes-sync/engine.mjs";
 import { buildRemoteIndex, formatRemoteTree, deleteRemotePaths } from "../src/notes-sync/remote.mjs";
+import { SyncDaemon, fileLogger, defaultLogFile } from "../src/notes-sync/daemon.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -117,6 +118,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox notes-conflicts      分析百度云冲突副本，判定哪份是最新保留本（只读）
   ai-toolbox notes-sync           执行一轮真实双向同步（--dry-run 只预演）
   ai-toolbox notes-remote         查看 ima 知识库现状；--delete <路径> 删除指定条目（cgi 接口）
+  ai-toolbox notes-daemon         常驻双向同步（--once 只跑一轮，--interval 秒）
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -896,6 +898,9 @@ async function main() {
       root: { type: "string" },
       delete: { type: "string", multiple: true },
       files: { type: "string" },
+      once: { type: "boolean", default: false },
+      interval: { type: "string" },
+      quiet: { type: "boolean", default: false },
     },
   });
 
@@ -1145,7 +1150,7 @@ async function main() {
       if (json) {
         result = { command: "notes-sync", ...report };
       } else {
-        console.log(`本地 ${report.localFiles} 个文件 / ima ${report.remoteNotes} 篇笔记${report.dryRun ? "（dry-run）" : ""}`);
+        console.log(`本地 ${report.localFiles} 个文件 / ima ${report.remoteFiles ?? 0} 个条目${report.dryRun ? "（dry-run）" : ""}`);
         console.log(`决策  ${JSON.stringify(report.counts)}`);
         console.log(`错误  ${report.errors.length}`);
         for (const a of report.actions.filter((a) => a.decision !== "noop").slice(0, 25)) {
@@ -1186,6 +1191,27 @@ async function main() {
         console.log(formatRemoteTree(index, { maxFiles: values.files ? Number(values.files) : 0 }));
         result = null;
       }
+      break;
+    }
+    case "notes-daemon": {
+      const logFile = defaultLogFile();
+      const write = fileLogger(logFile);
+      const quiet = Boolean(values.quiet);
+      const logLine = (line) => {
+        write(line);
+        if (!quiet) console.log(line);
+      };
+      const daemon = new SyncDaemon({
+        log: logLine,
+        intervalMs: values.interval ? Number(values.interval) * 1000 : undefined,
+      });
+      const stop = () => daemon.stop();
+      process.on("SIGTERM", stop);
+      process.on("SIGINT", stop);
+      logLine(`daemon start interval=${daemon.intervalMs}ms log=${logFile}`);
+      await daemon.start({ once: Boolean(values.once) });
+      logLine("daemon exit");
+      result = null;
       break;
     }
     case "notes-conflicts": {

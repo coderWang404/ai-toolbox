@@ -246,16 +246,15 @@ export function makeTempVault(files = {}) {
 export function configFor(overrides = {}) {
   return {
     vaultRoot: overrides.vaultRoot,
+    knowledgeBaseName: "个人知识库",
     knowledgeBaseId: TEST_KB,
+    rootPath: "笔记",
     folderId: "",
     excludes: [],
     inboxDir: "ima-inbox",
-    conflictStrategy: "newest-wins",
     includeBinary: true,
-    pullMode: "append",
-    useReplace: true,
-    recycleFolderId: "",
-    contentFormat: 0,
+    contentFormat: 1,
+    backupBeforePull: true,
     localPollMs: 1000,
     remotePollMs: 10000,
     maxFileBytes: 90 * 1024 * 1024,
@@ -264,11 +263,12 @@ export function configFor(overrides = {}) {
   };
 }
 
-export function makeEngineOpts(client, vault, overrides = {}) {
+/** store 是 MockRemoteStore（路径镜像）；旧签名传 client 时也可以，但新引擎只认 store。 */
+export function makeEngineOpts(store, vault, overrides = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "notes-e2e-data-"));
   return {
     opts: {
-      client,
+      store,
       config: configFor({ vaultRoot: vault.root, ...overrides.config }),
       stateFile: path.join(dir, "state.json"),
       trashRoot: path.join(dir, "trash"),

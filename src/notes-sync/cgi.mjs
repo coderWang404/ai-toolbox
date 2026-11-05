@@ -27,6 +27,10 @@ import path from "node:path";
 export const CGI_BASE = "https://ima.qq.com/cgi-bin";
 export const WRITER = `${CGI_BASE}/knowledge_tab_writer`;
 export const READER = `${CGI_BASE}/knowledge_tab_reader`;
+export const AUTH_LOGIN = `${CGI_BASE}/auth_login`;
+
+// IMA-TOKEN 只有 2 小时（tokenValidTime=7200），提前 5 分钟续，避免同步跑到一半断掉。
+export const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 /** 条目类型（实测值）。 */
 export const MEDIA_TYPE = Object.freeze({
@@ -73,6 +77,20 @@ export function cookieHeader(session) {
   return Object.entries(parts).map(([k, v]) => `${k}=${v}`).join("; ");
 }
 
+/** 有并发上限的 map，保持结果顺序。 */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 export class CgiError extends Error {
   constructor(message, { code, httpStatus, endpoint } = {}) {
     super(message);
@@ -83,12 +101,73 @@ export class CgiError extends Error {
   }
 }
 
+/**
+ * 用 refreshToken 换一张新的小票（IMA-TOKEN），并把结果写回登录态文件。
+ *
+ * 端点来自 bundle：`LoginHttpServiceUrlPrefix = "auth_login"`，方法 `refresh(e)` 发
+ * `${urlPrefix}/refresh`，body 经前端 `q()` 驼转蛇 → `{ user_id, refresh_token, token_type }`。
+ * 回包是扁平的 `{ code, msg, token, token_valid_time, user_id }`，没有 data 包装。
+ *
+ * 为什么必须有：小票只有 2 小时，过期后**所有** cgi 接口都返回 `600001 服务繁忙`，
+ * 与真正的限频同一个码，肉眼完全分不出来。实测 2026-11-05 14:08 过期，
+ * 之后 get_home_page_data / get_knowledge_list 全部 600001。
+ */
+export async function refreshSession({ session, file = sessionPath(), fetchImpl } = {}) {
+  const current = session ?? loadSession(file);
+  if (!current.refreshToken) {
+    throw new CgiError("登录态里没有 refreshToken，只能重新登录 ima 网页端再抓一次", {
+      endpoint: "auth_login/refresh",
+    });
+  }
+  const res = await (fetchImpl ?? globalThis.fetch)(`${AUTH_LOGIN}/refresh`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      from_browser_ima: "1",
+      Referer: "https://ima.qq.com/wikis",
+      "x-ima-cookie": cookieHeader(current),
+      "x-ima-bkn": String(bkn(current.token)),
+    },
+    body: JSON.stringify({
+      user_id: current.userId,
+      refresh_token: current.refreshToken,
+      token_type: Number(current.tokenType ?? 0),
+    }),
+  });
+  const text = await res.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new CgiError(`续期返回非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`, {
+      httpStatus: res.status, endpoint: "auth_login/refresh",
+    });
+  }
+  if (json.code !== 0 || !json.token) {
+    throw new CgiError(`续期失败：${json.msg || `code ${json.code}`}`, {
+      code: json.code, httpStatus: res.status, endpoint: "auth_login/refresh",
+    });
+  }
+  const validTime = Number(json.token_valid_time ?? 0) || Number(current.tokenValidTime ?? 0) || 7200;
+  const next = {
+    ...current,
+    token: json.token,
+    tokenValidTime: validTime,
+    tokenExpiredTime: Date.now() + validTime * 1000,
+  };
+  // 服务端目前不回新 refreshToken，回了就一并接住，免得丢掉轮换后的票据。
+  if (json.refresh_token) next.refreshToken = json.refresh_token;
+  saveSession(next, file);
+  return next;
+}
+
 export class CgiClient {
-  constructor({ session, baseUrl = CGI_BASE, fetchImpl, referer = "https://ima.qq.com/wikis" } = {}) {
+  constructor({ session, baseUrl = CGI_BASE, fetchImpl, referer = "https://ima.qq.com/wikis", autoRefresh = true } = {}) {
     this.session = session ?? loadSession();
     this.baseUrl = baseUrl;
     this.fetch = fetchImpl ?? globalThis.fetch;
     this.referer = referer;
+    this.autoRefresh = autoRefresh;
     this._kbCache = null;
   }
 
@@ -102,28 +181,61 @@ export class CgiClient {
     };
   }
 
-  async call(servicePath, body = {}) {
-    const url = `${this.baseUrl}/${servicePath}`;
-    const res = await this.fetch(url, {
+  /** 小票快过期（或强制）就先续期，返回当前可用的登录态。 */
+  async ensureFresh({ force = false } = {}) {
+    if (!this.autoRefresh) return this.session;
+    const exp = Number(this.session.tokenExpiredTime ?? 0);
+    if (!force && exp > 0 && exp - Date.now() > TOKEN_REFRESH_MARGIN_MS) return this.session;
+    this.session = await refreshSession({ session: this.session, fetchImpl: this.fetch });
+    return this.session;
+  }
+
+  async request(servicePath, body) {
+    const res = await this.fetch(`${this.baseUrl}/${servicePath}`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
     });
     const text = await res.text();
-    let json;
     try {
-      json = JSON.parse(text);
+      return JSON.parse(text);
     } catch {
       throw new CgiError(`返回非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`, {
         httpStatus: res.status, endpoint: servicePath,
       });
     }
-    if (json.code !== 0) {
-      throw new CgiError(json.msg || `code ${json.code}`, {
-        code: json.code, httpStatus: res.status, endpoint: servicePath,
-      });
+  }
+
+  async call(servicePath, body = {}) {
+    await this.ensureFresh();
+    const tokenBefore = this.session.token;
+    const json = await this.request(servicePath, body);
+    if (json.code === 0) return json;
+
+    // 600001 既可能是真限频，也可能是小票刚刚过期。只有确实换到了新小票才值得重试一次，
+    // 否则真限频会被我们放大成两次请求。
+    if (json.code === 600001 && this.autoRefresh) {
+      let refreshed = true;
+      try {
+        await this.ensureFresh({ force: true });
+      } catch (err) {
+        refreshed = false;
+        throw new CgiError(`${json.msg || `code ${json.code}`}（续期失败：${err.message}）`, {
+          code: json.code, endpoint: servicePath,
+        });
+      }
+      if (refreshed && this.session.token !== tokenBefore) {
+        const retry = await this.request(servicePath, body);
+        if (retry.code === 0) return retry;
+        throw new CgiError(retry.msg || `code ${retry.code}`, {
+          code: retry.code, endpoint: servicePath,
+        });
+      }
     }
-    return json;
+
+    throw new CgiError(json.msg || `code ${json.code}`, {
+      code: json.code, endpoint: servicePath,
+    });
   }
 
   // ---------- 读 ----------
@@ -190,21 +302,69 @@ export class CgiClient {
     return out;
   }
 
-  /** 递归整棵树，返回扁平的 [{path, mediaId, title, mediaType, folderId}]，path 用 / 分隔。 */
-  async listTree({ knowledgeBaseId, folderId = "", prefix = "", maxDepth = 12 } = {}) {
-    const items = await this.listAll({ knowledgeBaseId, folderId });
+  /**
+   * 整棵树，返回扁平的 [{path, mediaId, title, mediaType, folderId}]，path 用 / 分隔。
+   *
+   * 按层并发：串行递归 71 个目录要 30 秒以上，同步轮询完全等不起；
+   * 每层 8 路并发之后整棵树降到 2-4 秒。
+   */
+  async listTree({ knowledgeBaseId, folderId = "", prefix = "", maxDepth = 12, concurrency = 8 } = {}) {
     const out = [];
-    for (const it of items) {
-      const p = prefix ? `${prefix}/${it.title}` : it.title;
-      out.push({ ...it, path: p, folderId });
-      if (it.mediaType === MEDIA_TYPE.FOLDER && maxDepth > 0) {
-        const sub = await this.listTree({
-          knowledgeBaseId, folderId: it.mediaId, prefix: p, maxDepth: maxDepth - 1,
-        });
-        out.push(...sub);
-      }
+    let level = [{ folderId, prefix }];
+    for (let depth = 0; level.length && depth < maxDepth; depth++) {
+      const batches = await mapLimit(level, concurrency, async (node) => {
+        const items = await this.listAll({ knowledgeBaseId, folderId: node.folderId });
+        return items.map((it) => ({
+          ...it,
+          path: node.prefix ? `${node.prefix}/${it.title}` : it.title,
+          folderId: node.folderId,
+        }));
+      });
+      const flat = batches.flat();
+      out.push(...flat);
+      level = flat
+        .filter((it) => it.mediaType === MEDIA_TYPE.FOLDER)
+        .map((it) => ({ folderId: it.mediaId, prefix: it.path }));
     }
     return out;
+  }
+
+  // ---------- 媒体 ----------
+
+  /**
+   * 取条目的媒体信息，里面有**带签名的下载地址** `jump_url`。
+   *
+   * 为什么必须靠它：条目上的 `raw_file_url` 只是 COS key（形如
+   * `2/<bucket>/file_manager/<hash>.md`），直接 GET 会 403 missing parameter t；
+   * 签名只有这个接口会下发。实测下载回来的字节与本地文件 sha256 完全一致，
+   * 所以文件型条目是可以无损双向的，不必为了「能读回正文」而转成 note 型。
+   */
+  async media({ mediaId }) {
+    const j = await this.call("file_manager/get_media", { media_id: mediaId });
+    const info = j.jump_url_info ?? {};
+    return {
+      mediaId,
+      contentType: j.content_type ?? "",
+      fileSize: Number(j.file_size ?? 0),
+      url: j.jump_url ?? info.url ?? "",
+      headers: info.headers ?? {},
+      raw: j,
+    };
+  }
+
+  /** 下载文件型条目的原始字节。 */
+  async downloadMedia({ mediaId }) {
+    const info = await this.media({ mediaId });
+    if (!info.url) {
+      throw new CgiError("get_media 没有返回 jump_url", { endpoint: "file_manager/get_media" });
+    }
+    const res = await this.fetch(info.url, { headers: info.headers });
+    if (!res.ok) {
+      throw new CgiError(`下载条目失败 HTTP ${res.status}`, {
+        httpStatus: res.status, endpoint: "media",
+      });
+    }
+    return { bytes: Buffer.from(await res.arrayBuffer()), contentType: info.contentType };
   }
 
   // ---------- 写 ----------

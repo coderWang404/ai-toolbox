@@ -11,7 +11,8 @@ import { decide, Decision } from "../src/notes-sync/reconcile.mjs";
 import { emptyState, putRecord, saveState, loadState } from "../src/notes-sync/state.mjs";
 import { SyncEngine } from "../src/notes-sync/engine.mjs";
 import { loadConfig } from "../src/notes-sync/config.mjs";
-import { MockImaClient, makeTempVault, makeEngineOpts } from "./helpers/mock-ima.mjs";
+import { MockRemoteStore } from "./helpers/mock-remote.mjs";
+import { makeTempVault, makeEngineOpts } from "./helpers/mock-ima.mjs";
 
 function pctl(values, p) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -116,9 +117,9 @@ test("state 1000 条记录读写", () => {
 test("引擎单轮吞吐：200 文件全量推送", async () => {
   const files = {};
   for (let i = 0; i < 200; i++) files[`学习笔记/d${i % 10}/n${i}.md`] = `# N${i}\n\n内容 ${i}\n`;
-  const client = new MockImaClient();
+  const store = new MockRemoteStore();
   const vault = makeTempVault(files);
-  const { opts, cleanup } = makeEngineOpts(client, vault);
+  const { opts, cleanup } = makeEngineOpts(store, vault);
   try {
     const t0 = performance.now();
     const r = await new SyncEngine(opts).runOnce();

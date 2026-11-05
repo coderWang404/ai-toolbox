@@ -4,49 +4,26 @@
 // 路径是唯一稳定的身份标识；media_id 在「删了重建」时会变，标题在 ima 里允许重名。
 //
 // 远端读写全部走 cgi（网页端接口），因为 OpenAPI 没有删除/改名/建目录能力。
-import { CgiClient, MEDIA_TYPE } from "./cgi.mjs";
+import { MEDIA_TYPE } from "./cgi.mjs";
+import { RemoteStore } from "./remote-store.mjs";
 import { loadConfig } from "./config.mjs";
 
 export const DEFAULT_KB_NAME = "个人知识库";
 export const DEFAULT_ROOT_PATH = "笔记";
 
-/** 建远端索引：相对路径 → 条目。rootPath 之前的层级会从 path 里剥掉。 */
+/** 建远端索引：相对路径 → 条目。内部走 RemoteStore，与同步引擎共用同一套列举逻辑。 */
 export async function buildRemoteIndex({
   kbName = DEFAULT_KB_NAME,
   rootPath = DEFAULT_ROOT_PATH,
   client,
   config = loadConfig(),
 } = {}) {
-  const cgi = client ?? new CgiClient();
-  const kbId = await cgi.resolveKnowledgeBaseId(kbName || config.knowledgeBaseName || DEFAULT_KB_NAME);
-
-  // 定位 rootPath 对应的文件夹（逐级下钻）；没有就退回知识库根目录。
-  let rootFolderId = kbId;
-  const rootSegments = String(rootPath || "").split("/").filter(Boolean);
-  const top = await cgi.listAll({ knowledgeBaseId: kbId });
-  let walk = top;
-  for (const seg of rootSegments) {
-    const hit = walk.find((i) => i.mediaType === MEDIA_TYPE.FOLDER && i.title === seg);
-    if (!hit) { walk = []; rootFolderId = null; break; }
-    rootFolderId = hit.mediaId;
-    walk = await cgi.listAll({ knowledgeBaseId: kbId, folderId: rootFolderId });
-  }
-
-  const items = [];
-  if (rootFolderId) {
-    items.push(...(await cgi.listTree({ knowledgeBaseId: kbId, folderId: rootFolderId })));
-  }
-  const byPath = new Map();
-  for (const it of items) byPath.set(it.path, it);
-  return {
-    kbId,
-    kbName,
-    rootPath: rootSegments.join("/"),
-    rootFolderId,
-    items,
-    byPath,
-    client: cgi,
-  };
+  const store = new RemoteStore({
+    config: { ...config, knowledgeBaseName: kbName || config.knowledgeBaseName, rootPath: rootPath || config.rootPath },
+    cgi: client,
+  });
+  const index = await store.index();
+  return { ...index, kbName, client: store.cgi, store };
 }
 
 /** 只打印目录树，文件按扩展名折叠统计，避免 600 行刷屏。 */

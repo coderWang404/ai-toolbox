@@ -194,14 +194,13 @@ test("state 读写：映射表落盘、可回读、统计正确", () => {
     const state = loadState(file);
     assert.deepEqual(state, emptyState());
     putRecord(state, "学习笔记/a.md", {
-      title: "a", noteId: "nt_1", mediaId: "md_1", kbId: "ima_kb_x",
-      baseHash: "H", remoteHash: "H", remoteModifyTime: 123,
-      lastSyncAt: 456, lastLocalMtimeMs: 789,
+      mediaId: "md_1", fileSize: 12, baseLocalHash: "H",
+      remoteUpdateTime: 123, lastSyncAt: 456,
     });
     saveState(state, file);
     const back = loadState(file);
-    assert.equal(recordFor(back, "学习笔记/a.md").noteId, "nt_1");
-    assert.deepEqual(statsOf(back), { total: 1, withNoteId: 1, withBaseHash: 1, lastSyncAt: 456 });
+    assert.equal(recordFor(back, "学习笔记/a.md").mediaId, "md_1");
+    assert.deepEqual(statsOf(back), { total: 1, withMediaId: 1, withBaseHash: 1, lastSyncAt: 456 });
     removeRecord(back, "学习笔记/a.md");
     assert.equal(recordFor(back, "学习笔记/a.md"), null);
   } finally {

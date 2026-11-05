@@ -7,14 +7,15 @@ import path from "node:path";
 import { SyncEngine } from "../src/notes-sync/engine.mjs";
 import { scanVault } from "../src/notes-sync/vault.mjs";
 import { loadState } from "../src/notes-sync/state.mjs";
-import { MockImaClient, makeTempVault, makeEngineOpts } from "./helpers/mock-ima.mjs";
+import { MockRemoteStore } from "./helpers/mock-remote.mjs";
+import { makeTempVault, makeEngineOpts } from "./helpers/mock-ima.mjs";
 
 function setup(files = {}) {
-  const client = new MockImaClient();
+  const store = new MockRemoteStore();
   const vault = makeTempVault(files);
-  const { opts, cleanup } = makeEngineOpts(client, vault);
+  const { opts, cleanup } = makeEngineOpts(store, vault);
   return {
-    client, vault, opts,
+    store, vault, opts,
     engine: () => new SyncEngine(opts),
     cleanup: () => { cleanup(); vault.cleanup(); },
   };
@@ -36,7 +37,7 @@ test("连续 100 轮同步：状态收敛、无错误、无重复推送", async 
     assert.ok(pushes === 0, `首轮之后不应再有 push，实际 ${pushes}`);
     const state = loadState(s.opts.stateFile);
     assert.equal(Object.keys(state.entries).length, 2);
-    assert.equal(readFileSync(path.join(s.vault.root, "a.md"), "utf8").includes("ima 补记"), false);
+    assert.equal(s.store.remotePaths().length, 2);
   } finally {
     s.cleanup();
   }
@@ -45,7 +46,7 @@ test("连续 100 轮同步：状态收敛、无错误、无重复推送", async 
 test("单条写失败被隔离，下轮自动补齐，不中断整轮", async () => {
   const s = setup({ "a.md": "# A\n", "b.md": "# B\n", "c.md": "# C\n" });
   try {
-    s.client.failNext = 1; // 第一条 importDoc 失败
+    s.store.failNext = 1; // 第一条上传失败
     const r1 = await s.engine().runOnce();
     assert.equal(r1.errors.length, 1, `应恰好隔离一条失败，实际 ${JSON.stringify(r1.errors)}`);
     assert.ok((r1.counts["create-remote"] ?? 0) >= 2, "其余文件仍应成功");
@@ -62,7 +63,7 @@ test("限频导致整轮失败时，state 文件不被写坏", async () => {
   try {
     await s.engine().runOnce();
     const before = readFileSync(s.opts.stateFile, "utf8");
-    s.client.rateLimitNext = 1;
+    s.store.failIndexNext = 1;
     await assert.rejects(() => s.engine().runOnce(), /rate limited/);
     assert.equal(readFileSync(s.opts.stateFile, "utf8"), before);
     const r = await s.engine().runOnce();
@@ -114,8 +115,7 @@ test("中文/空格/特殊字符路径与内容可稳定往返", async () => {
     const r = await s.engine().runOnce();
     assert.equal(r.errors.length, 0);
     assert.equal(r.counts["create-remote"], 2);
-    const rec = loadState(s.opts.stateFile).entries["学习笔记/开发工具/git 学习 指南 (2026).md"];
-    s.client.editInIma(rec.noteId, "# git 学习\n\n| 列 | 值 |\n| --- | --- |\n\n```js\nconst a = 1;\n```\n\n补充一行\n");
+    s.store.editRemote("学习笔记/开发工具/git 学习 指南 (2026).md", "# git 学习\n\n| 列 | 值 |\n| --- | --- |\n\n```js\nconst a = 1;\n```\n\n补充一行\n");
     const r2 = await s.engine().runOnce();
     assert.equal(r2.counts.pull, 1);
     const text = readFileSync(path.join(s.vault.root, "学习笔记/开发工具/git 学习 指南 (2026).md"), "utf8");
@@ -134,7 +134,7 @@ test("并发启动两个引擎实例不会把同一文件重复推两次", async
       s.engine().runOnce({ dryRun: true }),
       s.engine().runOnce({ dryRun: true }),
     ]);
-    assert.equal(s.client.calls.importDoc, 0, "dry-run 并发不应写");
+    assert.equal(s.store.calls.upload, 0, "dry-run 并发不应写");
     assert.equal(r1.errors.length + r2.errors.length, 0);
   } finally {
     s.cleanup();

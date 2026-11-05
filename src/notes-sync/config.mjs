@@ -10,6 +10,9 @@ export const DEFAULT_VAULT = "/Users/MacBook/baidusync/笔记";
 // 仅保留技术性过滤（临时文件、系统垃圾、点目录、冲突副本），不针对任何内容目录。
 export const DEFAULT_EXCLUDES = [];
 export const DEFAULT_INBOX = "ima-inbox";
+// vault 根对应知识库里的哪个文件夹。远端层级与本地相对路径一一对应。
+export const DEFAULT_KB_NAME = "个人知识库";
+export const DEFAULT_ROOT_PATH = "笔记";
 
 function readTrimmed(file) {
   if (!file || !existsSync(file)) return null;
@@ -63,28 +66,26 @@ export function loadConfig(overrides = {}) {
   }
   return {
     vaultRoot: overrides.vaultRoot || file.vaultRoot || DEFAULT_VAULT,
+    // 远端知识库：名字用于 cgi 侧解析（个人知识库的 cgi ID 等于 userId），
+    // knowledgeBaseId 是 OpenAPI 侧的 ima_kb_xxx，两个 ID 体系不通用。
+    knowledgeBaseName: overrides.knowledgeBaseName || file.knowledgeBaseName || DEFAULT_KB_NAME,
     knowledgeBaseId: overrides.knowledgeBaseId || file.knowledgeBaseId || "",
+    // vault 根在知识库里对应的文件夹；远端按这个文件夹下的层级镜像本地相对路径。
+    rootPath: overrides.rootPath || file.rootPath || DEFAULT_ROOT_PATH,
+    // v1 遗留字段（note 型 + inbox 方案），保留以免旧配置直接报错，新引擎不再使用。
     folderId: overrides.folderId || file.folderId || "",
     excludes: overrides.excludes || file.excludes || DEFAULT_EXCLUDES,
     inboxDir: overrides.inboxDir || file.inboxDir || DEFAULT_INBOX,
-    // newest-wins：两端都改过时以较新时间戳者为准，不生成任何冲突副本。
-    conflictStrategy: overrides.conflictStrategy || file.conflictStrategy || "newest-wins",
     // 全库同步：图片/附件也走文件型上传通道。
     includeBinary: overrides.includeBinary ?? file.includeBinary ?? true,
-    // 实测（2026-11-05，真实凭证）：get_doc_content 的 target_content_format=1 返回 Markdown，
-    // 0/3 是纯文本、2 是富文本；export_note 端点不存在（404 / 210001）。
-    // 因此默认走 markdown 全文回写，再用 normalizeMarkdown 过滤纯格式重排。
-    pullMode: overrides.pullMode || file.pullMode || "markdown",
-    // add_knowledge 的同名替换策略；OpenAPI 侧待验证，失效时自动退回「新建 + 旧条目移回收站」。
-    useReplace: overrides.useReplace ?? file.useReplace ?? true,
-    recycleFolderId: overrides.recycleFolderId || file.recycleFolderId || "",
     // 1 = Markdown（实测唯一保留 # / ## / > / ``` 的取值）。
     contentFormat: overrides.contentFormat ?? file.contentFormat ?? 1,
+    // 远端覆盖本地前先把本地版本移进回收站，保留 trashRetentionDays 天。
+    backupBeforePull: overrides.backupBeforePull ?? file.backupBeforePull ?? true,
     localPollMs: overrides.localPollMs ?? file.localPollMs ?? 1000,
     remotePollMs: overrides.remotePollMs ?? file.remotePollMs ?? 10000,
     // 与旧 note-sync 一致：单文件 90MB 以上才跳过并告警，不做内容级排除。
     maxFileBytes: overrides.maxFileBytes ?? file.maxFileBytes ?? 90 * 1024 * 1024,
-    // ima 无删除接口，本地删除只进回收站，不主动删云端条目。
     trashRetentionDays: overrides.trashRetentionDays ?? file.trashRetentionDays ?? 30,
   };
 }
