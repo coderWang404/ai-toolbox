@@ -11,7 +11,7 @@ export function statePath() {
 }
 
 export function emptyState() {
-  return { version: STATE_VERSION, updatedAt: 0, entries: {} };
+  return { version: STATE_VERSION, updatedAt: 0, entries: {}, inboxNotes: {}, inboxInitialized: false };
 }
 
 export function loadState(file = statePath()) {
@@ -21,7 +21,13 @@ export function loadState(file = statePath()) {
     if (!parsed || typeof parsed.entries !== "object" || parsed.entries === null) {
       return emptyState();
     }
-    return { version: STATE_VERSION, updatedAt: parsed.updatedAt ?? 0, entries: parsed.entries };
+    return {
+      version: STATE_VERSION,
+      updatedAt: parsed.updatedAt ?? 0,
+      entries: parsed.entries,
+      inboxNotes: parsed.inboxNotes ?? {},
+      inboxInitialized: Boolean(parsed.inboxInitialized),
+    };
   } catch {
     // 状态文件损坏时不能静默重置（否则会把全库当成首次同步，造成重复导入）。
     throw new Error(`同步状态文件损坏，拒绝覆盖：${file}。请手工检查或从备份恢复。`);
@@ -33,6 +39,8 @@ export function saveState(state, file = statePath()) {
     version: STATE_VERSION,
     updatedAt: Date.now(),
     entries: state.entries,
+    inboxNotes: state.inboxNotes ?? {},
+    inboxInitialized: Boolean(state.inboxInitialized),
   };
   atomicWrite(file, `${JSON.stringify(payload, null, 2)}\n`, 0o600);
   return payload;

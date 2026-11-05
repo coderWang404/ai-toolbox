@@ -17,7 +17,8 @@ import { loadConfig } from "./config.mjs";
 import { dataFile } from "../paths.mjs";
 import { scanVault, sha256, atomicWrite, moveToTrash, mimeFor } from "./vault.mjs";
 import { loadState, saveState, putRecord, removeRecord } from "./state.mjs";
-import { RemoteStore } from "./remote-store.mjs";
+import { RemoteStore, noteIdFromMediaId } from "./remote-store.mjs";
+import { safeName } from "./transform.mjs";
 import { Decision, summarize } from "./reconcile.mjs";
 
 const dirOf = (relPath) => relPath.split("/").slice(0, -1).join("/");
@@ -105,6 +106,15 @@ export class SyncEngine {
       }
     }
 
+    // 4. ima App 里手写的原生笔记（不在同步文件夹内）→ 本地 inbox。
+    if (this.config.pullNotes !== false) {
+      try {
+        actions.push(...await this.pullInboxNotes({ dryRun }));
+      } catch (err) {
+        errors.push({ path: "(inbox)", message: String(err.message ?? err) });
+      }
+    }
+
     // 新建条目拿不到 update_time，轮末按目录回查一次补进基线，
     // 否则下一轮会把「自己刚推的那份」当成远端变化又拉回来。
     if (!dryRun && this._created.length) {
@@ -135,6 +145,10 @@ export class SyncEngine {
 
   async processLocal(file, remote, { dryRun, verify }) {
     const relPath = file.path;
+    // inbox 是「从 ima 拉下来」的单向落地目录，dir 层面的 exclude 之外再兜一层。
+    if (relPath.startsWith(`${this.config.inboxDir}/`)) {
+      return { path: relPath, decision: "skip", reason: "inbox" };
+    }
     if (!mimeFor(relPath)) {
       return { path: relPath, decision: "skip", reason: "ima 不支持的扩展名" };
     }
@@ -176,7 +190,7 @@ export class SyncEngine {
         });
         return { path: relPath, decision: Decision.NOOP, reason: "adopted-by-size" };
       }
-      const bytes = await this.store.download(r.mediaId);
+      const bytes = await this.store.readEntry(relPath, r);
       if (sha256(bytes) === localHash) {
         this.persistRecord(relPath, {
           mediaId: r.mediaId,
@@ -214,7 +228,7 @@ export class SyncEngine {
     }
 
     // 远端变了（或两端都变）：必须下载才知道真实内容。
-    const bytes = await this.store.download(r.mediaId);
+    const bytes = await this.store.readEntry(relPath, r);
     if (sha256(bytes) === localHash) {
       // 内容其实一致（例如远端只是被重命名/替换成同一份），只刷新基线。
       if (!dryRun) {
@@ -285,6 +299,82 @@ export class SyncEngine {
     return { path: relPath, decision: Decision.PULL, bytes: bytes.length };
   }
 
+  /**
+   * ima App 里新建的笔记是 note 型，落在「笔记列表」而不是同步文件夹，
+   * 主链路的远端索引根本看不到它们。这里单独把它们拉到本地 inbox，
+   * 只拉不推（inbox 目录已在 config 的 excludes 里）。
+   */
+  async pullInboxNotes({ dryRun }) {
+    const notes = await this.store.listNotes();
+    const inbox = this.state.inboxNotes ?? (this.state.inboxNotes = {});
+    const known = new Set();
+    for (const rec of Object.values(this.state.entries)) {
+      const id = rec.mediaId ? noteIdFromMediaId(rec.mediaId) : null;
+      if (id) known.add(id);
+    }
+    // 首次启用只记录基线：知识库里可能已经堆着几十篇历史笔记（含早期探针残留），
+    // 一次性灌进 vault 会很难看。之后新增的才自动落地；要全量导入用 notes-inbox --all。
+    if (!this.state.inboxInitialized) {
+      if (dryRun) return [];
+      for (const note of notes) {
+        inbox[note.noteId] = {
+          title: note.title, modifyTime: Number(note.modifyTime ?? 0), baseline: true, path: null,
+        };
+      }
+      this.state.inboxInitialized = true;
+      this.persist();
+      this.log(`  inbox 基线：跳过 ${notes.length} 篇历史笔记（notes-inbox --all 可手工导入）`);
+      return [];
+    }
+
+    const actions = [];
+    for (const note of notes) {
+      if (known.has(note.noteId)) continue;
+      const prev = inbox[note.noteId];
+      const modifyTime = Number(note.modifyTime ?? 0);
+      if (prev && modifyTime <= Number(prev.modifyTime ?? 0)) continue;
+      const relPath = `${this.config.inboxDir}/${safeName(note.title)}.md`;
+      if (dryRun) {
+        actions.push({ path: relPath, decision: "note-inbox", reason: "dry-run" });
+        continue;
+      }
+      const text = await this.store.readNote(note.noteId);
+      atomicWrite(path.join(this.vaultRoot, relPath), text, 0o600);
+      inbox[note.noteId] = {
+        path: relPath, title: note.title, modifyTime,
+        lastPullAt: Date.now(), baseHash: sha256(Buffer.from(text, "utf8")),
+      };
+      actions.push({ path: relPath, decision: "note-inbox" });
+    }
+    return actions;
+  }
+
+  /** 手工把 ima 里的手写笔记导入 inbox（`notes-inbox --pull all|noteId|标题`）。 */
+  async importNotes({ all = false, ids = [] } = {}) {
+    const notes = await this.store.listNotes();
+    const inbox = this.state.inboxNotes ?? (this.state.inboxNotes = {});
+    const targets = all
+      ? notes
+      : notes.filter((n) => ids.includes(n.noteId) || ids.includes(n.title));
+    const out = [];
+    for (const note of targets) {
+      const relPath = `${this.config.inboxDir}/${safeName(note.title)}.md`;
+      const text = await this.store.readNote(note.noteId);
+      atomicWrite(path.join(this.vaultRoot, relPath), text, 0o600);
+      inbox[note.noteId] = {
+        path: relPath,
+        title: note.title,
+        modifyTime: Number(note.modifyTime ?? 0),
+        lastPullAt: Date.now(),
+        baseHash: sha256(Buffer.from(text, "utf8")),
+      };
+      out.push({ noteId: note.noteId, title: note.title, path: relPath, bytes: Buffer.byteLength(text) });
+    }
+    this.state.inboxInitialized = true;
+    saveState(this.state, this.stateFile);
+    return out;
+  }
+
   async handleRemoteOnly(relPath, r, remote, { dryRun }) {
     const rec = this.state.entries[relPath] ?? null;
 
@@ -302,7 +392,7 @@ export class SyncEngine {
 
     // 从没同步过的远端条目 → 拉到本地。
     if (dryRun) return { path: relPath, decision: Decision.CREATE_LOCAL, reason: "dry-run" };
-    const bytes = await this.store.download(r.mediaId);
+    const bytes = await this.store.readEntry(relPath, r);
     atomicWrite(path.join(this.vaultRoot, relPath), bytes, 0o600);
     this.persistRecord(relPath, {
       mediaId: r.mediaId,

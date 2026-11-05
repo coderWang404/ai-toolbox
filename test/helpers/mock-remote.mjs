@@ -127,8 +127,30 @@ export class MockRemoteStore {
     throw new Error(`media 不存在: ${mediaId}`);
   }
 
-  async listNotes() { return []; }
-  async readNote() { return ""; }
+  /** 与真实实现一致：文件型走下载，note 型走 OpenAPI 读正文。 */
+  async readEntry(relPath, info) {
+    return this.download(info.mediaId);
+  }
+
+  /** 测试辅助：登记一条「ima App 里手写的笔记」（note 型，不在同步文件夹里）。 */
+  putNote({ noteId, title, content, modifyTime }) {
+    this.noteEntries ??= new Map();
+    this.noteEntries.set(noteId, {
+      noteId, title, content, modifyTime: modifyTime ?? this.tick(),
+    });
+  }
+
+  async listNotes() {
+    return [...(this.noteEntries?.values() ?? [])].map((n) => ({
+      noteId: n.noteId, title: n.title, modifyTime: n.modifyTime,
+    }));
+  }
+
+  async readNote(noteId) {
+    const n = this.noteEntries?.get(noteId);
+    if (!n) throw new Error(`note 不存在: ${noteId}`);
+    return n.content;
+  }
 
   // ---------- 测试辅助 ----------
 

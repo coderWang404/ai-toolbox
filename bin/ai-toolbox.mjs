@@ -119,6 +119,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox notes-sync           执行一轮真实双向同步（--dry-run 只预演）
   ai-toolbox notes-remote         查看 ima 知识库现状；--delete <路径> 删除指定条目（cgi 接口）
   ai-toolbox notes-daemon         常驻双向同步（--once 只跑一轮，--interval 秒）
+  ai-toolbox notes-inbox          查看 ima 里手写的笔记；--pull all|<noteId|标题> 导入 inbox
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -901,6 +902,7 @@ async function main() {
       once: { type: "boolean", default: false },
       interval: { type: "string" },
       quiet: { type: "boolean", default: false },
+      pull: { type: "string", multiple: true },
     },
   });
 
@@ -1191,6 +1193,29 @@ async function main() {
         console.log(formatRemoteTree(index, { maxFiles: values.files ? Number(values.files) : 0 }));
         result = null;
       }
+      break;
+    }
+    case "notes-inbox": {
+      const engine = new SyncEngine();
+      const notes = await engine.store.listNotes();
+      const inbox = engine.state.inboxNotes ?? {};
+      const pull = (values.pull ?? []).flatMap((v) => String(v).split(",")).map((s) => s.trim()).filter(Boolean);
+      if (pull.length) {
+        const got = await engine.importNotes({
+          all: pull.includes("all"), ids: pull.filter((v) => v !== "all"),
+        });
+        console.log(`导入 ${got.length} 篇到 ${engine.config.inboxDir}/`);
+        for (const g of got) console.log(`  ✓ ${g.path}  ${g.bytes}B`);
+        result = json ? { command: "notes-inbox", imported: got } : null;
+        break;
+      }
+      console.log(`ima 手写笔记 ${notes.length} 篇（落地目录 ${engine.config.inboxDir}/）`);
+      for (const n of notes) {
+        const rec = inbox[n.noteId];
+        const flag = rec?.path ? "已导入" : rec?.baseline ? "历史未导入" : "未导入";
+        console.log(`  ${n.noteId}  ${new Date(Number(n.modifyTime)).toISOString().slice(0, 16).replace("T", " ")}  ${flag}  ${String(n.title).slice(0, 40)}`);
+      }
+      result = json ? { command: "notes-inbox", notes: notes.map((n) => ({ ...n, state: inbox[n.noteId]?.path ? "imported" : inbox[n.noteId]?.baseline ? "baseline" : "new" })) } : null;
       break;
     }
     case "notes-daemon": {

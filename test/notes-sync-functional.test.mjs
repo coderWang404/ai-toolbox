@@ -201,6 +201,31 @@ test("远端被替换成相同内容时只刷新基线，不覆盖本地", async
   }
 });
 
+test("ima 里手写的笔记 → 落下本地 inbox，且不会被推回去", async () => {
+  const s = setup({ "a.md": "# A\n" });
+  try {
+    await s.engine().runOnce(); // 第一轮建立 inbox 基线
+    s.store.putNote({
+      noteId: "7524000000000001",
+      title: "手机随手记",
+      content: "# 随手记\n\n在 ima App 里写的\n",
+    });
+    const r = await s.engine().runOnce();
+    const hit = r.actions.find((a) => a.decision === "note-inbox");
+    assert.ok(hit, JSON.stringify(r.counts));
+    const target = path.join(s.vault.root, "ima-inbox/手机随手记.md");
+    assert.equal(existsSync(target), true);
+    assert.match(readFileSync(target, "utf8"), /在 ima App 里写的/);
+
+    const uploadsBefore = s.store.calls.upload;
+    await s.engine().runOnce();
+    assert.equal(s.store.calls.upload, uploadsBefore, "inbox 文件不应推回 ima");
+    assert.equal(s.store.remotePaths().some((p) => p.startsWith("ima-inbox/")), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("本地新建目录会在远端逐级补出来", async () => {
   const s = setup({ "a/深/层/x.md": "# x\n" });
   try {

@@ -74,10 +74,16 @@ export function loadConfig(overrides = {}) {
     rootPath: overrides.rootPath || file.rootPath || DEFAULT_ROOT_PATH,
     // v1 遗留字段（note 型 + inbox 方案），保留以免旧配置直接报错，新引擎不再使用。
     folderId: overrides.folderId || file.folderId || "",
-    excludes: overrides.excludes || file.excludes || DEFAULT_EXCLUDES,
+    // inbox 是「从 ima 拉下来」的单向落地目录，不再推回去（否则会和 note 型条目重名）。
+    excludes: [...new Set([
+      ...(overrides.excludes || file.excludes || DEFAULT_EXCLUDES),
+      overrides.inboxDir || file.inboxDir || DEFAULT_INBOX,
+    ])],
     inboxDir: overrides.inboxDir || file.inboxDir || DEFAULT_INBOX,
     // 全库同步：图片/附件也走文件型上传通道。
     includeBinary: overrides.includeBinary ?? file.includeBinary ?? true,
+    // ima App 里手写的原生笔记（note 型，不在同步文件夹里）拉到本地 inbox。
+    pullNotes: overrides.pullNotes ?? file.pullNotes ?? true,
     // 1 = Markdown（实测唯一保留 # / ## / > / ``` 的取值）。
     contentFormat: overrides.contentFormat ?? file.contentFormat ?? 1,
     // 远端覆盖本地前先把本地版本移进回收站，保留 trashRetentionDays 天。

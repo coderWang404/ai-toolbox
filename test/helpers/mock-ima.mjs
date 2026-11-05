@@ -250,7 +250,7 @@ export function configFor(overrides = {}) {
     knowledgeBaseId: TEST_KB,
     rootPath: "笔记",
     folderId: "",
-    excludes: [],
+    excludes: ["ima-inbox"],
     inboxDir: "ima-inbox",
     includeBinary: true,
     contentFormat: 1,

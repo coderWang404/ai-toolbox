@@ -17,6 +17,12 @@ import { ImaClient } from "./ima-api.mjs";
 import { loadConfig } from "./config.mjs";
 import { mimeFor, extOf } from "./vault.mjs";
 
+/** note 型条目的 media_id 形如 note_cls1_<hash>_<noteId>，最后一段才是 OpenAPI 的 doc_id。 */
+export function noteIdFromMediaId(mediaId) {
+  const m = /^note_.*_(\d+)$/.exec(String(mediaId ?? ""));
+  return m ? m[1] : null;
+}
+
 export const DEFAULT_KB_NAME = "个人知识库";
 export const DEFAULT_ROOT_PATH = "笔记";
 const FILE_MEDIA_TYPE = 1;
@@ -272,6 +278,22 @@ export class RemoteStore {
   async download(mediaId) {
     const { bytes } = await this.cgi.downloadMedia({ mediaId });
     return bytes;
+  }
+
+  /**
+   * 按条目类型取内容：
+   * 文件型 → 走签名地址下载原始字节（逐字节保真）；
+   * note 型 → 走 OpenAPI 读 Markdown（服务端会规范化排版，但这是唯一能拿到正文的路，
+   *           get_media 对 note 型直接失败：实测 fetch failed）。
+   */
+  async readEntry(relPath, info) {
+    if (info.mediaType === MEDIA_TYPE.NOTE) {
+      const noteId = noteIdFromMediaId(info.mediaId);
+      if (!noteId) throw new Error(`无法从 media_id 解析 noteId：${info.mediaId}`);
+      const text = await this.readNote(noteId);
+      return Buffer.from(text, "utf8");
+    }
+    return this.download(info.mediaId);
   }
 
   /**
