@@ -61,12 +61,6 @@ import {
 } from "../src/today-gateway.mjs";
 import { readFileSync } from "node:fs";
 import { codexConfigPath, codexHome, ccSwitchDbPath } from "../src/paths.mjs";
-import { runProbe, formatProbeSummary } from "../src/notes-sync/probe.mjs";
-import { localStatus, buildPlan, formatPlan } from "../src/notes-sync/plan.mjs";
-import { scanConflicts, summarizeConflicts, formatConflictReport } from "../src/notes-sync/conflicts.mjs";
-import { SyncEngine } from "../src/notes-sync/engine.mjs";
-import { buildRemoteIndex, formatRemoteTree, deleteRemotePaths } from "../src/notes-sync/remote.mjs";
-import { SyncDaemon, fileLogger, defaultLogFile } from "../src/notes-sync/daemon.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -112,14 +106,6 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox today-launch          以调试端口重启 Today.app（CDP 传输需要）
   ai-toolbox today-serve           启动 Today 的 OpenAI 兼容网关（--port 指定端口）
   ai-toolbox doctor                检查运行环境
-  ai-toolbox notes-status         扫描本地 vault 与同步状态（不联网、只读）
-  ai-toolbox notes-probe          实测 ima OpenAPI 端点能力，输出证据（只读）
-  ai-toolbox notes-plan           预演一轮双向同步会做什么（只读、不落盘）
-  ai-toolbox notes-conflicts      分析百度云冲突副本，判定哪份是最新保留本（只读）
-  ai-toolbox notes-sync           执行一轮真实双向同步（--dry-run 只预演）
-  ai-toolbox notes-remote         查看 ima 知识库现状；--delete <路径> 删除指定条目（cgi 接口）
-  ai-toolbox notes-daemon         常驻双向同步（--once 只跑一轮，--interval 秒）
-  ai-toolbox notes-inbox          查看 ima 里手写的笔记；--pull all|<noteId|标题> 导入 inbox
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -894,15 +880,6 @@ async function main() {
       port: { type: "string" },
       host: { type: "string" },
       action: { type: "string" },
-      "show-content": { type: "boolean", default: false },
-      kb: { type: "string" },
-      root: { type: "string" },
-      delete: { type: "string", multiple: true },
-      files: { type: "string" },
-      once: { type: "boolean", default: false },
-      interval: { type: "string" },
-      quiet: { type: "boolean", default: false },
-      pull: { type: "string", multiple: true },
     },
   });
 
@@ -1109,146 +1086,6 @@ async function main() {
     case "today-serve":
       await cmdTodayServe(opts);
       return;
-    case "notes-status": {
-      const status = localStatus();
-      if (json) {
-        result = { command: "notes-status", ...status };
-      } else {
-        console.log(`vault     ${status.vaultRoot}`);
-        console.log(`全库      ${status.totalFiles} 个文件 / ${status.totalBytes} 字节`);
-        console.log(`  文本    ${status.textFiles}，二进制 ${status.binaryFiles}`);
-        console.log(`已映射    ${status.mapped}，未映射 ${status.unmapped}`);
-        console.log(`state     ${JSON.stringify(status.state)}`);
-        console.log(`目录排除  ${status.excludes.length ? status.excludes.join(", ") : "无（全库同步）"}`);
-        result = null;
-      }
-      break;
-    }
-    case "notes-probe": {
-      const report = await runProbe({ showContent: Boolean(values["show-content"]) });
-      if (json) {
-        result = { command: "notes-probe", ...report };
-      } else {
-        console.log(formatProbeSummary(report));
-        result = null;
-      }
-      break;
-    }
-    case "notes-plan": {
-      const plan = await buildPlan();
-      if (json) {
-        result = { command: "notes-plan", ...plan };
-      } else {
-        console.log(formatPlan(plan));
-        result = null;
-      }
-      break;
-    }
-    case "notes-sync": {
-      const engine = new SyncEngine({
-        log: (m) => { if (!json) console.log(m); },
-      });
-      const report = await engine.runOnce({ dryRun: Boolean(values["dry-run"]) });
-      if (json) {
-        result = { command: "notes-sync", ...report };
-      } else {
-        console.log(`本地 ${report.localFiles} 个文件 / ima ${report.remoteFiles ?? 0} 个条目${report.dryRun ? "（dry-run）" : ""}`);
-        console.log(`决策  ${JSON.stringify(report.counts)}`);
-        console.log(`错误  ${report.errors.length}`);
-        for (const a of report.actions.filter((a) => a.decision !== "noop").slice(0, 25)) {
-          console.log(`  ${String(a.decision).padEnd(18)} ${a.path}${a.reason ? `  (${a.reason})` : ""}`);
-        }
-        result = null;
-      }
-      break;
-    }
-    case "notes-remote": {
-      const index = await buildRemoteIndex({
-        kbName: values.kb || undefined,
-        rootPath: values.root ?? undefined,
-      });
-      const delPaths = (values.delete ?? []).flatMap((v) => String(v).split(",")).map((s) => s.trim()).filter(Boolean);
-      if (delPaths.length) {
-        const r = await deleteRemotePaths(index, delPaths);
-        if (json) {
-          result = { command: "notes-remote", kbId: index.kbId, root: index.rootPath, ...r };
-        } else {
-          console.log(`删除 ${r.removed.length} 条，未找到 ${r.missing.length} 条，失败 ${r.fail.length} 条`);
-          for (const p of r.removed) console.log(`  ✓ ${p}`);
-          for (const p of r.missing) console.log(`  ? ${p}（远端无此路径）`);
-          for (const f of r.fail) console.log(`  ✗ ${f.path}（retCode ${f.retCode}）`);
-          result = null;
-        }
-        break;
-      }
-      if (json) {
-        result = {
-          command: "notes-remote",
-          kbId: index.kbId,
-          root: index.rootPath,
-          total: index.items.length,
-          items: index.items.map((i) => ({ path: i.path, mediaId: i.mediaId, mediaType: i.mediaType })),
-        };
-      } else {
-        console.log(formatRemoteTree(index, { maxFiles: values.files ? Number(values.files) : 0 }));
-        result = null;
-      }
-      break;
-    }
-    case "notes-inbox": {
-      const engine = new SyncEngine();
-      const notes = await engine.store.listNotes();
-      const inbox = engine.state.inboxNotes ?? {};
-      const pull = (values.pull ?? []).flatMap((v) => String(v).split(",")).map((s) => s.trim()).filter(Boolean);
-      if (pull.length) {
-        const got = await engine.importNotes({
-          all: pull.includes("all"), ids: pull.filter((v) => v !== "all"),
-        });
-        console.log(`导入 ${got.length} 篇到 ${engine.config.inboxDir}/`);
-        for (const g of got) console.log(`  ✓ ${g.path}  ${g.bytes}B`);
-        result = json ? { command: "notes-inbox", imported: got } : null;
-        break;
-      }
-      console.log(`ima 手写笔记 ${notes.length} 篇（落地目录 ${engine.config.inboxDir}/）`);
-      for (const n of notes) {
-        const rec = inbox[n.noteId];
-        const flag = rec?.path ? "已导入" : rec?.baseline ? "历史未导入" : "未导入";
-        console.log(`  ${n.noteId}  ${new Date(Number(n.modifyTime)).toISOString().slice(0, 16).replace("T", " ")}  ${flag}  ${String(n.title).slice(0, 40)}`);
-      }
-      result = json ? { command: "notes-inbox", notes: notes.map((n) => ({ ...n, state: inbox[n.noteId]?.path ? "imported" : inbox[n.noteId]?.baseline ? "baseline" : "new" })) } : null;
-      break;
-    }
-    case "notes-daemon": {
-      const logFile = defaultLogFile();
-      const write = fileLogger(logFile);
-      const quiet = Boolean(values.quiet);
-      const logLine = (line) => {
-        write(line);
-        if (!quiet) console.log(line);
-      };
-      const daemon = new SyncDaemon({
-        log: logLine,
-        intervalMs: values.interval ? Number(values.interval) * 1000 : undefined,
-      });
-      const stop = () => daemon.stop();
-      process.on("SIGTERM", stop);
-      process.on("SIGINT", stop);
-      logLine(`daemon start interval=${daemon.intervalMs}ms log=${logFile}`);
-      await daemon.start({ once: Boolean(values.once) });
-      logLine("daemon exit");
-      result = null;
-      break;
-    }
-    case "notes-conflicts": {
-      const items = scanConflicts();
-      if (json) {
-        result = { command: "notes-conflicts", summary: summarizeConflicts(items), items };
-      } else {
-        console.log(formatConflictReport(items));
-        result = null;
-      }
-      break;
-    }
     case "doctor":
       result = cmdDoctor(opts);
       break;
