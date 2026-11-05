@@ -1,7 +1,7 @@
 // 功能测试：本地 mock IMA 跑通同步引擎全链路 + 真实 HTTP mock 验证 API 层。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, existsSync, utimesSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, utimesSync, rmSync } from "node:fs";
 import path from "node:path";
 import { SyncEngine } from "../src/notes-sync/engine.mjs";
 import { ImaClient, rawCall, setBaseUrl } from "../src/notes-sync/ima-api.mjs";
@@ -159,6 +159,40 @@ test("全库同步：不排除任何内容目录，只过滤技术噪声", async
     const r = await s.engine().runOnce();
     assert.equal(r.localFiles, 3, `应扫到 3 个有效文件，实际 ${r.localFiles}`);
     assert.equal(s.client.kb.size, 3);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("本地删除传播到 ima 回收站，且不会被当成 ima 新笔记拉回", async () => {
+  const s = setup({ "a.md": "# A\n\n内容\n" }, { config: { recycleFolderId: "folder_recycle" } });
+  try {
+    await s.engine().runOnce();
+    rmSync(path.join(s.vault.root, "a.md"));
+    const r = await s.engine().runOnce();
+    assert.equal(r.counts["local-deleted"], 1, JSON.stringify(r.counts));
+    assert.equal(s.client.calls.moveKnowledge, 1, "应把条目移进回收站");
+    assert.equal(loadState(s.opts.stateFile).entries["a.md"].deleted, true);
+
+    const r2 = await s.engine().runOnce();
+    assert.equal(r2.counts["create-local"] ?? 0, 0, "不能把已删的 note 拉回来");
+    assert.equal(existsSync(path.join(s.vault.root, "a.md")), false);
+    assert.equal(s.client.calls.moveKnowledge, 1, "墓碑生效，不重复移动");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("未配置回收站文件夹时，删除只报告、不误动云端", async () => {
+  const s = setup({ "a.md": "# A\n" });
+  try {
+    await s.engine().runOnce();
+    rmSync(path.join(s.vault.root, "a.md"));
+    const r = await s.engine().runOnce();
+    const action = r.actions.find((a) => a.decision === "local-deleted");
+    assert.ok(action, JSON.stringify(r.counts));
+    assert.match(action.reason, /未配置回收站文件夹/);
+    assert.equal(s.client.calls.moveKnowledge, 0);
   } finally {
     s.cleanup();
   }

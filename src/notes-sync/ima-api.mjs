@@ -3,7 +3,16 @@
 // 响应：{ code: 0, msg, data }；code 非 0 为业务错误。
 // 端点与字段依据 zhonxia/obsidian-ima-sync 的 src/api.ts、公开 skill 文档整理，
 // 尚未在本机凭证下实测的端点在 probe.mjs 里标记为「待验证」。
+import { createHash, createHmac } from "node:crypto";
 import { loadCredentials } from "./config.mjs";
+
+function sha1Hex(text) {
+  return createHash("sha1").update(text, "utf8").digest("hex");
+}
+
+function hmacSha1(key, text) {
+  return createHmac("sha1", key).update(text, "utf8").digest("hex");
+}
 
 export const BASE_URL = "https://ima.qq.com";
 // 测试时指向本地 mock server；生产永远是上面的官方地址。
@@ -216,8 +225,61 @@ export class ImaClient {
     return true;
   }
 
-  addKnowledgeByMedia({ mediaId, title, knowledgeBaseId, folderId, duplicateNameStrategy } = {}) {
-    const body = { media_id: mediaId, title, knowledge_base_id: knowledgeBaseId };
+  /**
+   * 实测 create_media 即使传 apply_upload_mode=1，返回的仍是 upload_mode=2 的 COS 临时凭证
+   * （bucket_name / region / cos_key / token / secret_id / secret_key），没有 presigned_url。
+   * 这里手写 COS v5 签名后直接 PUT，省掉一个 SDK 依赖。
+   */
+  async uploadToCos(cred, bytes, contentType) {
+    const host = `${cred.bucket_name}.cos.${cred.region}.myqcloud.com`;
+    const pathname = `/${cred.cos_key}`;
+    const now = Math.floor(Date.now() / 1000);
+    const start = Number(cred.start_time) || now;
+    const end = Number(cred.expired_time) || now + 3600;
+    const keyTime = `${start};${end}`;
+    const signKey = hmacSha1(cred.secret_key, keyTime);
+
+    const headers = {
+      "content-type": contentType,
+      host,
+      "x-cos-security-token": cred.token,
+    };
+    const keys = Object.keys(headers).sort();
+    const httpHeaders = keys.map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(headers[k])}`).join("&");
+    const httpString = `put\n${pathname}\n\n${httpHeaders}\n`;
+    const stringToSign = `sha1\n${keyTime}\n${sha1Hex(httpString)}\n`;
+    const signature = hmacSha1(signKey, stringToSign);
+    const authorization = [
+      "q-sign-algorithm=sha1",
+      `q-ak=${cred.secret_id}`,
+      `q-sign-time=${keyTime}`,
+      `q-key-time=${keyTime}`,
+      `q-header-list=${keys.join(";")}`,
+      "q-url-param-list=",
+      `q-signature=${signature}`,
+    ].join("&");
+
+    const res = await fetch(`https://${host}${pathname}`, {
+      method: "PUT",
+      headers: { ...headers, Authorization: authorization },
+      body: bytes,
+    });
+    if (!res.ok) {
+      throw new ImaApiError(`COS 上传失败 HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`, {
+        httpStatus: res.status, endpoint: "cos-put",
+      });
+    }
+    return true;
+  }
+
+  /** 文件型条目实测必须带 media_type=1（缺省或不传返回 220001 参数错误）。 */
+  addKnowledgeByMedia({ mediaId, title, knowledgeBaseId, folderId, duplicateNameStrategy, mediaType = 1 } = {}) {
+    const body = {
+      media_id: mediaId,
+      title,
+      knowledge_base_id: knowledgeBaseId,
+      media_type: mediaType,
+    };
     if (folderId) body.folder_id = folderId;
     if (duplicateNameStrategy) body.duplicate_name_strategy = duplicateNameStrategy;
     return call(EP.ADD_KNOWLEDGE, body, this.creds);
@@ -229,11 +291,18 @@ export class ImaClient {
     }, this.creds);
   }
 
-  moveKnowledge({ mediaId, knowledgeBaseId, targetFolderId } = {}) {
+  /**
+   * 移动知识库条目。实测（真实凭证）请求体字段是 src_/dst_ 前缀：
+   * src_knowledge_base_id 必填，dst_knowledge_base_id 与 dst_folder_id 决定落点，
+   * dst_folder_id 传空串表示知识库根目录。返回 {move_results:{}}。
+   * ima 没有删除接口，删除只能靠移进「回收站」文件夹实现。
+   */
+  moveKnowledge({ mediaId, knowledgeBaseId, dstKnowledgeBaseId, targetFolderId } = {}) {
     return call(EP.MOVE_KNOWLEDGE, {
       media_id: mediaId,
-      knowledge_base_id: knowledgeBaseId,
-      target_folder_id: targetFolderId,
+      src_knowledge_base_id: knowledgeBaseId,
+      dst_knowledge_base_id: dstKnowledgeBaseId || knowledgeBaseId,
+      dst_folder_id: targetFolderId ?? "",
     }, this.creds);
   }
 }

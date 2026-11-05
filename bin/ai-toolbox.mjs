@@ -64,6 +64,7 @@ import { codexConfigPath, codexHome, ccSwitchDbPath } from "../src/paths.mjs";
 import { runProbe, formatProbeSummary } from "../src/notes-sync/probe.mjs";
 import { localStatus, buildPlan, formatPlan } from "../src/notes-sync/plan.mjs";
 import { scanConflicts, summarizeConflicts, formatConflictReport } from "../src/notes-sync/conflicts.mjs";
+import { SyncEngine } from "../src/notes-sync/engine.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -113,6 +114,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox notes-probe          实测 ima OpenAPI 端点能力，输出证据（只读）
   ai-toolbox notes-plan           预演一轮双向同步会做什么（只读、不落盘）
   ai-toolbox notes-conflicts      分析百度云冲突副本，判定哪份是最新保留本（只读）
+  ai-toolbox notes-sync           执行一轮真实双向同步（--dry-run 只预演）
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -1125,6 +1127,24 @@ async function main() {
         result = { command: "notes-plan", ...plan };
       } else {
         console.log(formatPlan(plan));
+        result = null;
+      }
+      break;
+    }
+    case "notes-sync": {
+      const engine = new SyncEngine({
+        log: (m) => { if (!json) console.log(m); },
+      });
+      const report = await engine.runOnce({ dryRun: Boolean(values["dry-run"]) });
+      if (json) {
+        result = { command: "notes-sync", ...report };
+      } else {
+        console.log(`本地 ${report.localFiles} 个文件 / ima ${report.remoteNotes} 篇笔记${report.dryRun ? "（dry-run）" : ""}`);
+        console.log(`决策  ${JSON.stringify(report.counts)}`);
+        console.log(`错误  ${report.errors.length}`);
+        for (const a of report.actions.filter((a) => a.decision !== "noop").slice(0, 25)) {
+          console.log(`  ${String(a.decision).padEnd(18)} ${a.path}${a.reason ? `  (${a.reason})` : ""}`);
+        }
         result = null;
       }
       break;
