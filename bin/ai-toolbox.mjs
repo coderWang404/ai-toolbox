@@ -65,6 +65,7 @@ import { runProbe, formatProbeSummary } from "../src/notes-sync/probe.mjs";
 import { localStatus, buildPlan, formatPlan } from "../src/notes-sync/plan.mjs";
 import { scanConflicts, summarizeConflicts, formatConflictReport } from "../src/notes-sync/conflicts.mjs";
 import { SyncEngine } from "../src/notes-sync/engine.mjs";
+import { buildRemoteIndex, formatRemoteTree, deleteRemotePaths } from "../src/notes-sync/remote.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -115,6 +116,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox notes-plan           预演一轮双向同步会做什么（只读、不落盘）
   ai-toolbox notes-conflicts      分析百度云冲突副本，判定哪份是最新保留本（只读）
   ai-toolbox notes-sync           执行一轮真实双向同步（--dry-run 只预演）
+  ai-toolbox notes-remote         查看 ima 知识库现状；--delete <路径> 删除指定条目（cgi 接口）
 
 选项:
   --scope <范围>        chatgpt（默认，主 app-server）| chatgpt-all（含 computer-use 会话）| all
@@ -890,6 +892,10 @@ async function main() {
       host: { type: "string" },
       action: { type: "string" },
       "show-content": { type: "boolean", default: false },
+      kb: { type: "string" },
+      root: { type: "string" },
+      delete: { type: "string", multiple: true },
+      files: { type: "string" },
     },
   });
 
@@ -1145,6 +1151,39 @@ async function main() {
         for (const a of report.actions.filter((a) => a.decision !== "noop").slice(0, 25)) {
           console.log(`  ${String(a.decision).padEnd(18)} ${a.path}${a.reason ? `  (${a.reason})` : ""}`);
         }
+        result = null;
+      }
+      break;
+    }
+    case "notes-remote": {
+      const index = await buildRemoteIndex({
+        kbName: values.kb || undefined,
+        rootPath: values.root ?? undefined,
+      });
+      const delPaths = (values.delete ?? []).flatMap((v) => String(v).split(",")).map((s) => s.trim()).filter(Boolean);
+      if (delPaths.length) {
+        const r = await deleteRemotePaths(index, delPaths);
+        if (json) {
+          result = { command: "notes-remote", kbId: index.kbId, root: index.rootPath, ...r };
+        } else {
+          console.log(`删除 ${r.removed.length} 条，未找到 ${r.missing.length} 条，失败 ${r.fail.length} 条`);
+          for (const p of r.removed) console.log(`  ✓ ${p}`);
+          for (const p of r.missing) console.log(`  ? ${p}（远端无此路径）`);
+          for (const f of r.fail) console.log(`  ✗ ${f.path}（retCode ${f.retCode}）`);
+          result = null;
+        }
+        break;
+      }
+      if (json) {
+        result = {
+          command: "notes-remote",
+          kbId: index.kbId,
+          root: index.rootPath,
+          total: index.items.length,
+          items: index.items.map((i) => ({ path: i.path, mediaId: i.mediaId, mediaType: i.mediaType })),
+        };
+      } else {
+        console.log(formatRemoteTree(index, { maxFiles: values.files ? Number(values.files) : 0 }));
         result = null;
       }
       break;
