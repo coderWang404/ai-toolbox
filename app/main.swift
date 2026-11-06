@@ -17,22 +17,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let windowController = MainWindowController()
     private let backend = Backend.shared
     private lazy var watcher = ConfigWatcher(configPath: configPath)
-    private lazy var claudeWatcher = ConfigWatcher(configPath: claudeProfilePath)
-    private lazy var claudeSettingsWatcher = ConfigWatcher(configPath: ccSwitchSettingsPath)
     private var providers: [ProviderSummary] = []
     private var currentId: String?
     private var menuStatus: String?
 
     private var configPath: String {
         NSString(string: "~/.codex/config.toml").expandingTildeInPath
-    }
-
-    private var claudeProfilePath: String {
-        NSString(string: "~/Library/Application Support/Claude-3p/configLibrary/00000000-0000-4000-8000-000000157210.json").expandingTildeInPath
-    }
-
-    private var ccSwitchSettingsPath: String {
-        NSString(string: "~/.cc-switch/settings.json").expandingTildeInPath
     }
 
     private var defaults: UserDefaults { .standard }
@@ -72,34 +62,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             windowController.selectPage(page)
         }
 
-        NotificationCenter.default.addObserver(
-            forName: .claudeConfigWrittenFromApp, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.claudeWatcher.baselineNow()
-            self?.claudeSettingsWatcher.baselineNow()
-        }
-        NotificationCenter.default.addObserver(
-            forName: .claudeWatchToggled, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            if self.windowController.claudeWatchIsOn {
-                self.startClaudeWatching()
-            } else {
-                self.claudeWatcher.stop()
-                self.claudeSettingsWatcher.stop()
-            }
-        }
-
         if defaults.bool(forKey: "watchEnabled") { startWatching() }
         windowController.setWatchState(watcher.isRunning)
-        if defaults.object(forKey: "watchClaudeEnabled") as? Bool ?? true { startClaudeWatching() }
-        windowController.setClaudeWatchState(claudeWatcher.isRunning)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         watcher.stop()
-        claudeWatcher.stop()
-        claudeSettingsWatcher.stop()
         Backend.shared.stopAll()
     }
 
@@ -206,50 +174,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(item)
         }
 
-        menu.addItem(.sectionHeader(title: "Claude Desktop"))
-        let openClaude = NSMenuItem(title: "打开 Claude Desktop", action: #selector(showClaudePage), keyEquivalent: "")
-        openClaude.target = self
-        menu.addItem(openClaude)
-        let claudeWatch = NSMenuItem(title: "自动跟随", action: #selector(toggleClaudeWatchFromMenu), keyEquivalent: "")
-        claudeWatch.target = self
-        claudeWatch.state = (claudeWatcher.isRunning || claudeSettingsWatcher.isRunning) ? .on : .off
-        menu.addItem(claudeWatch)
-
-        menu.addItem(.sectionHeader(title: "智商测试"))
-        let openIq = NSMenuItem(title: "打开智商测试", action: #selector(showIqPage), keyEquivalent: "")
-        openIq.target = self
-        menu.addItem(openIq)
-
-        menu.addItem(.sectionHeader(title: "OpenCode 额度"))
-        let openQuota = NSMenuItem(title: "打开额度", action: #selector(showQuotaPage), keyEquivalent: "")
-        openQuota.target = self
-        menu.addItem(openQuota)
-
-        menu.addItem(.sectionHeader(title: "ClinePass 额度"))
-        let openCline = NSMenuItem(title: "打开额度", action: #selector(showClinePage), keyEquivalent: "")
-        openCline.target = self
-        menu.addItem(openCline)
-
-        menu.addItem(.sectionHeader(title: "Grok Bot"))
-        let openGrok = NSMenuItem(title: "打开 Grok Bot", action: #selector(showGrokPage), keyEquivalent: "")
-        openGrok.target = self
-        menu.addItem(openGrok)
-
-        menu.addItem(.sectionHeader(title: "网络测速"))
-        let openSpeed = NSMenuItem(title: "打开测速", action: #selector(showSpeedPage), keyEquivalent: "")
-        openSpeed.target = self
-        menu.addItem(openSpeed)
-
-        menu.addItem(.sectionHeader(title: "Qoder 网络"))
-        let openQoderNetwork = NSMenuItem(title: "打开 Qoder 网络", action: #selector(showQoderNetworkPage), keyEquivalent: "")
-        openQoderNetwork.target = self
-        menu.addItem(openQoderNetwork)
-
-        menu.addItem(.sectionHeader(title: "Today"))
-        let openToday = NSMenuItem(title: "打开 Today", action: #selector(showTodayPage), keyEquivalent: "")
-        openToday.target = self
-        menu.addItem(openToday)
-
         menu.addItem(.sectionHeader(title: "cc-switch"))
         let openCc = NSMenuItem(title: "打开 cc-switch", action: #selector(showCcPage), keyEquivalent: "")
         openCc.target = self
@@ -266,6 +190,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.isEnabled = false
             menu.addItem(item)
         }
+
+        menu.addItem(.sectionHeader(title: "智商测试"))
+        let openIq = NSMenuItem(title: "打开智商测试", action: #selector(showIqPage), keyEquivalent: "")
+        openIq.target = self
+        menu.addItem(openIq)
+
+        menu.addItem(.sectionHeader(title: "额度"))
+        let openQuota = NSMenuItem(title: "打开额度", action: #selector(showQuotaPage), keyEquivalent: "")
+        openQuota.target = self
+        menu.addItem(openQuota)
+        let openCode = NSMenuItem(title: "OpenCode 额度", action: #selector(showOpenCodeQuota), keyEquivalent: "")
+        openCode.target = self
+        menu.addItem(openCode)
+        let openCline = NSMenuItem(title: "ClinePass 额度", action: #selector(showClineQuota), keyEquivalent: "")
+        openCline.target = self
+        menu.addItem(openCline)
+
+        menu.addItem(.sectionHeader(title: "网关与网络"))
+        let openGateway = NSMenuItem(title: "打开网关与网络", action: #selector(showGatewayPage), keyEquivalent: "")
+        openGateway.target = self
+        menu.addItem(openGateway)
+        let openGrok = NSMenuItem(title: "Grok Bot", action: #selector(showGrokPage), keyEquivalent: "")
+        openGrok.target = self
+        menu.addItem(openGrok)
+        let openToday = NSMenuItem(title: "Today", action: #selector(showTodayPage), keyEquivalent: "")
+        openToday.target = self
+        menu.addItem(openToday)
+        let openQoderNetwork = NSMenuItem(title: "Qoder 网络", action: #selector(showQoderNetworkPage), keyEquivalent: "")
+        openQoderNetwork.target = self
+        menu.addItem(openQoderNetwork)
+
+        menu.addItem(.sectionHeader(title: "网络测速"))
+        let openSpeed = NSMenuItem(title: "打开测速", action: #selector(showSpeedPage), keyEquivalent: "")
+        openSpeed.target = self
+        menu.addItem(openSpeed)
 
         menu.addItem(.separator())
         let nameItem = NSMenuItem(title: "菜单栏显示供应商名称", action: #selector(toggleShowName), keyEquivalent: "")
@@ -302,79 +261,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showWindow()
     }
 
-    @objc private func showClaudePage() {
+    @objc private func showIqPage() {
         windowController.selectPage(2)
         showWindow()
     }
 
-    @objc private func showIqPage() {
+    @objc private func showQuotaPage() {
         windowController.selectPage(3)
         showWindow()
     }
 
-    @objc private func showQuotaPage() {
+    @objc private func showOpenCodeQuota() {
+        windowController.selectPage(3)
+        windowController.selectQuotaTab(0)
+        showWindow()
+    }
+
+    @objc private func showClineQuota() {
+        windowController.selectPage(3)
+        windowController.selectQuotaTab(1)
+        showWindow()
+    }
+
+    @objc private func showGatewayPage() {
         windowController.selectPage(4)
         showWindow()
     }
 
-    @objc private func showClinePage() {
-        windowController.selectPage(5)
+    @objc private func showGrokPage() {
+        windowController.selectPage(4)
+        windowController.selectGatewayTab(0)
         showWindow()
     }
 
-    @objc private func showGrokPage() {
-        windowController.selectPage(6)
+    @objc private func showTodayPage() {
+        windowController.selectPage(4)
+        windowController.selectGatewayTab(1)
+        showWindow()
+    }
+
+    @objc private func showQoderNetworkPage() {
+        windowController.selectPage(4)
+        windowController.selectGatewayTab(2)
         showWindow()
     }
 
     @objc private func showSpeedPage() {
-        windowController.selectPage(7)
+        windowController.selectPage(5)
         showWindow()
     }
 
     @objc private func showCcPage() {
         windowController.selectPage(1)
         showWindow()
-    }
-
-    @objc private func showTodayPage() {
-        windowController.selectPage(8)
-        showWindow()
-    }
-
-    @objc private func showQoderNetworkPage() {
-        windowController.selectPage(9)
-        showWindow()
-    }
-
-    @objc private func toggleClaudeWatchFromMenu() {
-        if claudeWatcher.isRunning || claudeSettingsWatcher.isRunning {
-            claudeWatcher.stop()
-            claudeSettingsWatcher.stop()
-            defaults.set(false, forKey: "watchClaudeEnabled")
-            menuStatus = "已关闭 Claude Desktop 自动跟随"
-        } else {
-            startClaudeWatching()
-            menuStatus = "已开启 Claude Desktop 自动跟随"
-        }
-        windowController.setClaudeWatchState(claudeWatcher.isRunning)
-    }
-
-    private func startClaudeWatching() {
-        let follow = { [weak self] in
-            guard let self else { return }
-            self.menuStatus = "正在按 cc-switch 同步 Claude Desktop…"
-            self.windowController.autoReloadClaude { [weak self] in
-                self?.menuStatus = "⚡ Claude Desktop 已按 cc-switch 同步"
-            }
-        }
-        claudeWatcher.onChanged = follow
-        claudeSettingsWatcher.onChanged = follow
-        claudeWatcher.start()
-        claudeSettingsWatcher.start()
-        defaults.set(true, forKey: "watchClaudeEnabled")
-        menuStatus = "已开启 Claude Desktop 自动跟随"
-        follow()
     }
 
     @objc private func toggleRemoteFromMenu() {
@@ -457,14 +396,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let alert = NSAlert()
         alert.messageText = "AI 工具箱"
         alert.informativeText = """
-        本地 AI 小工具集合：Codex 供应商热切换、cc-switch 同步、桌面应用跟随、Grok Bot 网关。
+        本地 AI 小工具集合：Codex 供应商热切换、cc-switch 同步、额度查询、本机网关与网络检查。
 
         · 原理：切换配置后只重启 Codex 的 app-server 子进程
         · Codex：自动跟随本机供应商，并把供应商配置同步到远程
-        · Claude Desktop：跟随 cc-switch 的桌面供应商，重新打开应用后生效
         · cc-switch：以本机配置为准，实时同步远程的供应商、端点和当前选择
-        · Today：通过 CDP 使用 Today.app，并导出独立的 OpenAI 兼容网关
-        · Qoder 网络：DNS/hosts、Clash TUN、HTTPDNS 状态与一键修复
+        · 额度：OpenCode 与 ClinePass 的密钥额度，同页分段查看
+        · 网关与网络：Grok Bot / Today 的 OpenAI 兼容网关，以及 Qoder 的 DNS/hosts、Clash、HTTPDNS 状态
         · 工具目录：\(backend.scriptPath.map { URL(fileURLWithPath: $0).deletingLastPathComponent().deletingLastPathComponent().path } ?? "未找到")
         """
         alert.alertStyle = .informational

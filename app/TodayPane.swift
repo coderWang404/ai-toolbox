@@ -6,6 +6,7 @@ final class TodayPane: NSObject {
     var onDetail: ((String) -> Void)?
 
     private let backend: Backend
+    private let embedded: Bool
     private var statusInfo: TodayStatus?
     private var models: [TodayModel] = []
     private var busy = false
@@ -28,8 +29,9 @@ final class TodayPane: NSObject {
     private var topControls: NSStackView!
     private var gatewayControls: NSStackView!
 
-    init(backend: Backend) {
+    init(backend: Backend, embedded: Bool = false) {
         self.backend = backend
+        self.embedded = embedded
         super.init()
         root = makeRoot()
     }
@@ -41,8 +43,8 @@ final class TodayPane: NSObject {
 
     func sidebarDetail() -> String {
         if let current = statusInfo?.currentModel, !current.isEmpty { return current }
-        if statusInfo?.cdp?.reachable == true { return "已连接 Today" }
-        return "未连接 Today"
+        if statusInfo?.cdp?.reachable == true { return "已连接" }
+        return "未连接"
     }
 
     private func makeRoot() -> NSView {
@@ -121,6 +123,7 @@ final class TodayPane: NSObject {
         renderStatus()
         renderGateway()
         renderModels()
+        if embedded { return PageChrome.embeddedScroll(content: body) }
         return PageChrome.scroll(
             title: "Today",
             subtitle: "把 Today.app 的模型接成一个独立的本地 OpenAI 兼容模块。",

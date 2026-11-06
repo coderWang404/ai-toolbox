@@ -163,44 +163,6 @@ struct FingerprintResult: Codable {
     let fingerprint: String
 }
 
-struct ClaudeLiveInfo: Codable {
-    let baseUrl: String?
-    let host: String?
-    let tokenTail: String?
-    let token: String?
-    let provider: String?
-    let scheme: String?
-    let liveProviderId: String?
-}
-
-struct ClaudeListResult: Codable {
-    let ok: Bool
-    let currentId: String?
-    let providers: [ProviderSummary]
-    let live: ClaudeLiveInfo?
-    let ccSwitchRunning: Bool?
-}
-
-struct ClaudeReloadDetail: Codable {
-    let wasRunning: Bool?
-    let restarted: Bool?
-    let pid: Int?
-    let dryRun: Bool?
-}
-
-struct ClaudeSwitchResult: Codable {
-    let ok: Bool
-    let provider: ProviderSummary?
-    let reload: ClaudeReloadDetail?
-    let error: String?
-}
-
-struct ClaudeReloadResult: Codable {
-    let ok: Bool
-    let current: ProviderRef?
-    let reload: ClaudeReloadDetail?
-}
-
 struct IqModel: Codable {
     let id: String
     let thinkingLevels: [String]
@@ -477,15 +439,6 @@ struct GoQuotaReport: Codable {
     var keys: [GoQuotaKey]
     let fetchedAt: String?
     let error: String?
-}
-
-struct ClaudeSyncResult: Codable {
-    let ok: Bool
-    let aligned: Bool?
-    let applied: Bool?
-    let current: ProviderRef?
-    let reload: ClaudeReloadDetail?
-    let reason: String?
 }
 
 // MARK: - Today

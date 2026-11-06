@@ -13,15 +13,11 @@ final class SettingsSidebarController: NSViewController, NSTableViewDataSource, 
     var onSelect: ((Int) -> Void)?
     private var items: [Item] = [
         Item(page: 0, title: "Codex", symbol: "arrow.left.arrow.right", tint: .systemBlue, detail: "供应商热切换"),
-        Item(page: 2, title: "Claude Desktop", symbol: "bubble.left.and.bubble.right", tint: .systemOrange, detail: "跟随 cc-switch"),
         Item(page: 1, title: "cc-switch", symbol: "arrow.triangle.2.circlepath", tint: .systemGreen, detail: "实时同步"),
-        Item(page: 3, title: "智商测试", symbol: "brain.head.profile", tint: .systemPurple, detail: "选题作画"),
-        Item(page: 4, title: "OpenCode 额度", symbol: "chart.bar.fill", tint: .systemTeal, detail: "查询剩余额度"),
-        Item(page: 5, title: "ClinePass 额度", symbol: "creditcard.fill", tint: .systemPink, detail: "查询剩余额度"),
-        Item(page: 6, title: "Grok Bot", symbol: "sparkles", tint: .systemIndigo, detail: "本机网关"),
-        Item(page: 7, title: "网络测速", symbol: "speedometer", tint: .systemCyan, detail: "未测速"),
-        Item(page: 8, title: "Today", symbol: "text.bubble.fill", tint: .systemBrown, detail: "独立网关"),
-        Item(page: 9, title: "Qoder 网络", symbol: "network", tint: .systemMint, detail: "DNS / Clash / HTTPDNS"),
+        Item(page: 2, title: "智商测试", symbol: "brain.head.profile", tint: .systemPurple, detail: "选题作画"),
+        Item(page: 3, title: "额度", symbol: "chart.bar.fill", tint: .systemTeal, detail: "OpenCode / ClinePass"),
+        Item(page: 4, title: "网关与网络", symbol: "point.3.connected.trianglepath.dotted", tint: .systemIndigo, detail: "Grok / Today / Qoder"),
+        Item(page: 5, title: "网络测速", symbol: "speedometer", tint: .systemCyan, detail: "未测速"),
     ]
     private let table = NSTableView()
     private var suppressSelection = false

@@ -6,6 +6,7 @@ final class ClineQuotaPane: NSObject {
     var onDetail: ((String) -> Void)?
 
     private let backend: Backend
+    private let embedded: Bool
     private var keys: [ClineKeyPublic] = []
     private var report: ClineQuotaReport?
     private var busy = false
@@ -22,8 +23,9 @@ final class ClineQuotaPane: NSObject {
     private let queryButton = NSButton()
     private let spinner = NSProgressIndicator()
 
-    init(backend: Backend) {
+    init(backend: Backend, embedded: Bool = false) {
         self.backend = backend
+        self.embedded = embedded
         super.init()
         root = makeRoot()
     }
@@ -122,6 +124,7 @@ final class ClineQuotaPane: NSObject {
         body.spacing = 22
         renderKeys()
         renderResults()
+        if embedded { return PageChrome.embeddedScroll(content: body) }
         return PageChrome.scroll(
             title: "ClinePass 额度",
             subtitle: "查询每把 ClinePass 密钥的三窗口剩余额度和账户余额。",

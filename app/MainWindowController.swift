@@ -20,20 +20,18 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var ccRows: NSStackView!
     private var sidebar: SettingsSidebarController!
     private var iqPane: NSView!
-    private var quotaPane: NSView!
+    private var quotaMergePane: NSView!
+    private var quotaMerged: MergedPageController!
     private var quotaController: GoQuotaPane!
-    private var clinePane: NSView!
     private var clineController: ClineQuotaPane!
-    private var grokPane: NSView!
+    private var gatewayMergePane: NSView!
+    private var gatewayMerged: MergedPageController!
     private var grokController: GrokBotPane!
+    private var todayController: TodayPane!
+    private var qoderController: QoderNetworkPane!
     private var speedPane: NSView!
     private var speedController: SpeedPane!
-    private var todayPane: NSView!
-    private var todayController: TodayPane!
-    private var qoderPane: NSView!
-    private var qoderController: QoderNetworkPane!
     private let codexKeyHost = NSStackView()
-    private let claudeKeyHost = NSStackView()
     private var iqProviderPopup: NSPopUpButton!
     private var iqTopicPopup: NSPopUpButton!
     private var iqModelPopup: NSPopUpButton!
@@ -55,17 +53,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var iqMetaLabel: NSTextField!
     private var iqLog: NSTextView!
     private var codexNote: NSTextField!
-    private var claudeNote: NSTextField!
     private var providerTableHeight: NSLayoutConstraint!
-    private var claudeTableHeight: NSLayoutConstraint!
     private var codexPane: NSView!
-    private var claudePane: NSView!
     private var ccPane: NSView!
-    private var claudeTableView: NSTableView!
-    private var claudeHeaderLabel: NSTextField!
-    private var claudeEffectiveLabel: NSTextField!
-    private var claudeStatusLabel: StatusLine!
-    private var claudeWatchSwitch: NSSwitch!
     private var ccSyncSwitch: NSSwitch!
     private var ccStatusLabel: StatusLine!
     private var addRemoteButton: NSButton!
@@ -73,10 +63,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     private let backend = Backend.shared
     private var providers: [ProviderSummary] = []
-    private var claudeProviders: [ProviderSummary] = []
     private var currentId: String?
-    private var claudeCurrentId: String?
-    private var claudeLive: ClaudeLiveInfo?
     private var liveInfo: LiveInfo?
     private var remoteLive: [String: RemoteHostInfo] = [:]
     private var ccSwitchLive: [String: CcSwitchHostInfo] = [:]
@@ -108,14 +95,38 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         refresh()
-        refreshClaude()
     }
 
     func hide() { window?.orderOut(nil) }
 
     // MARK: - 构建界面
 
+    /// 旧版页面编号：0 Codex、1 cc-switch、2 Claude Desktop、3 智商测试、4 OpenCode、5 ClinePass、6 Grok、7 测速、8 Today、9 Qoder。
+    /// 新版：0 Codex、1 cc-switch、2 智商测试、3 额度、4 网关与网络、5 测速。
+    private func migratePageSchemaIfNeeded() {
+        guard defaults.integer(forKey: "mainPageSchema") < 2 else { return }
+        let saved = defaults.integer(forKey: "mainPage")
+        let mapped: Int
+        switch saved {
+        case 2: mapped = 1
+        case 3: mapped = 2
+        case 4, 5: mapped = 3
+        case 6: mapped = 4
+        case 7: mapped = 5
+        case 8, 9: mapped = 4
+        default: mapped = 0
+        }
+        if saved == 5 { defaults.set(1, forKey: "quotaTab") }
+        if saved == 4 { defaults.set(0, forKey: "quotaTab") }
+        if saved == 6 { defaults.set(0, forKey: "gatewayTab") }
+        if saved == 8 { defaults.set(1, forKey: "gatewayTab") }
+        if saved == 9 { defaults.set(2, forKey: "gatewayTab") }
+        defaults.set(mapped, forKey: "mainPage")
+        defaults.set(2, forKey: "mainPageSchema")
+    }
+
     private func buildWindow() {
+        migratePageSchemaIfNeeded()
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 880, height: 640),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -227,54 +238,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         codexNote.translatesAutoresizingMaskIntoConstraints = false
         codexBody.insertArrangedSubview(codexNote, at: 1)
         codexPane = codexBody
-
-        claudeHeaderLabel = makeLabel("加载中…", font: .systemFont(ofSize: 15, weight: .semibold), color: .labelColor)
-        claudeEffectiveLabel = makeLabel("", font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-        claudeEffectiveLabel.lineBreakMode = .byTruncatingMiddle
-        claudeNote = makeLabel("", font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
-        claudeNote.lineBreakMode = .byWordWrapping
-        claudeNote.maximumNumberOfLines = 3
-        claudeStatusLabel = StatusLine()
-        let claudeReload = NSButton(title: "重新打开", target: self, action: #selector(reloadClaudeNow))
-        claudeReload.bezelStyle = .rounded
-        claudeReload.bezelColor = .controlAccentColor
-        claudeKeyHost.orientation = .vertical
-        claudeKeyHost.alignment = .leading
-        claudeKeyHost.spacing = 4
-        let claudeCurrent = NSStackView(views: [
-            NSStackView(views: [claudeHeaderLabel, claudeEffectiveLabel, claudeKeyHost]),
-            flexibleSpace(),
-            claudeReload,
-        ])
-        claudeCurrent.orientation = .horizontal
-        claudeCurrent.alignment = .centerY
-        (claudeCurrent.arrangedSubviews[0] as? NSStackView)?.orientation = .vertical
-        if let texts = claudeCurrent.arrangedSubviews[0] as? NSStackView {
-            claudeKeyHost.widthAnchor.constraint(equalTo: texts.widthAnchor).isActive = true
-        }
-        (claudeCurrent.arrangedSubviews[0] as? NSStackView)?.alignment = .leading
-        let claudeCurrentGroup = GroupBox()
-        claudeCurrentGroup.addRow(claudeCurrent)
-        claudeTableView = makeProviderTable(action: #selector(claudeRowClicked))
-        let claudeScroll = makeTableScroll(claudeTableView)
-        claudeTableHeight = claudeScroll.heightAnchor.constraint(equalToConstant: 176)
-        claudeTableHeight.isActive = true
-        claudeWatchSwitch = makeSwitch(action: #selector(toggleClaudeWatch))
-        let claudeWatchOn = defaults.object(forKey: "watchClaudeEnabled") as? Bool ?? true
-        claudeWatchSwitch.state = claudeWatchOn ? .on : .off
-        let claudeFollow = GroupBox()
-        claudeFollow.addRow(SettingRow(title: "自动跟随 cc-switch", subtitle: "切换后退出并重新打开 Claude Desktop，并置于最前", accessory: claudeWatchSwitch))
-        let claudeBody = NSStackView(views: [
-            SectionView(title: "当前供应商", content: claudeCurrentGroup),
-            claudeNote,
-            SectionView(title: "供应商", content: claudeScroll),
-            SectionView(title: "自动跟随", content: claudeFollow),
-            claudeStatusLabel,
-        ])
-        claudeBody.orientation = .vertical
-        claudeBody.alignment = .leading
-        claudeBody.spacing = 22
-        claudePane = claudeBody
 
         ccStatusLabel = StatusLine()
         ccSyncSwitch = makeSwitch(action: #selector(toggleCcSync))
@@ -448,27 +411,52 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         iqBody.alignment = .leading
         iqBody.spacing = 22
         iqPane = wrapPage("智商测试", "选定题目、供应商和模型，看它能不能画出指定的动画。", iqBody)
-        quotaController = GoQuotaPane(backend: backend)
-        quotaController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 4, text) }
-        quotaPane = quotaController.root
-        clineController = ClineQuotaPane(backend: backend)
-        clineController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 5, text) }
-        clinePane = clineController.root
-        grokController = GrokBotPane(backend: backend)
-        grokController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 6, text) }
-        grokPane = grokController.root
+        quotaController = GoQuotaPane(backend: backend, embedded: true)
+        quotaController.onDetail = { [weak self] _ in self?.refreshSidebar() }
+        clineController = ClineQuotaPane(backend: backend, embedded: true)
+        clineController.onDetail = { [weak self] _ in self?.refreshSidebar() }
+        quotaMerged = MergedPageController(
+            title: "额度",
+            subtitle: "OpenCode 与 ClinePass 的密钥额度。用上方分段切换；两边的密钥和查询互不影响。",
+            tabs: [
+                MergedPageController.Tab(title: "OpenCode 额度", pane: quotaController.root, onShow: { [weak self] in self?.quotaController?.onShow() }),
+                MergedPageController.Tab(title: "ClinePass 额度", pane: clineController.root, onShow: { [weak self] in self?.clineController?.onShow() }),
+            ],
+            selected: defaults.integer(forKey: "quotaTab")
+        )
+        quotaMerged.onTabChanged = { [weak self] index in
+            self?.defaults.set(index, forKey: "quotaTab")
+            self?.refreshSidebar()
+        }
+        quotaMergePane = quotaMerged.root
+
+        grokController = GrokBotPane(backend: backend, embedded: true)
+        grokController.onDetail = { [weak self] _ in self?.refreshSidebar() }
+        todayController = TodayPane(backend: backend, embedded: true)
+        todayController.onDetail = { [weak self] _ in self?.refreshSidebar() }
+        qoderController = QoderNetworkPane(backend: backend, embedded: true)
+        qoderController.onDetail = { [weak self] _ in self?.refreshSidebar() }
+        gatewayMerged = MergedPageController(
+            title: "网关与网络",
+            subtitle: "Grok Bot 和 Today 的本机网关，以及 Qoder 的 DNS/hosts、Clash 状态。用上方分段切换。",
+            tabs: [
+                MergedPageController.Tab(title: "Grok Bot", pane: grokController.root, onShow: { [weak self] in self?.grokController?.onShow() }),
+                MergedPageController.Tab(title: "Today", pane: todayController.root, onShow: { [weak self] in self?.todayController?.onShow() }),
+                MergedPageController.Tab(title: "Qoder 网络", pane: qoderController.root, onShow: { [weak self] in self?.qoderController?.onShow() }),
+            ],
+            selected: defaults.integer(forKey: "gatewayTab")
+        )
+        gatewayMerged.onTabChanged = { [weak self] index in
+            self?.defaults.set(index, forKey: "gatewayTab")
+            self?.refreshSidebar()
+        }
+        gatewayMergePane = gatewayMerged.root
+
         speedController = SpeedPane(backend: backend)
-        speedController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 7, text) }
+        speedController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 5, text) }
         speedPane = speedController.root
-        todayController = TodayPane(backend: backend)
-        todayController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 8, text) }
-        todayPane = todayController.root
-        qoderController = QoderNetworkPane(backend: backend)
-        qoderController.onDetail = { [weak self] text in self?.sidebar?.setDetail(page: 9, text) }
-        qoderPane = qoderController.root
 
         codexPane = wrapPage("Codex", "跟随 cc-switch 热切换 Codex 供应商", codexPane)
-        claudePane = wrapPage("Claude Desktop", "跟随 cc-switch 的 Claude Desktop 供应商，切换后重新打开应用", claudePane)
         ccPane = wrapPage("cc-switch 同步", "以本机 cc-switch 为准，同步到远程机器", ccPane)
 
         sidebar = SettingsSidebarController()
@@ -476,7 +464,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let content = NSViewController()
         let host = NSView()
         host.wantsLayer = true
-        for pane in [codexPane!, claudePane!, ccPane!, iqPane!, quotaPane!, clinePane!, grokPane!, speedPane!, todayPane!, qoderPane!] {
+        for pane in [codexPane!, ccPane!, iqPane!, quotaMergePane!, gatewayMergePane!, speedPane!] {
             pane.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(pane)
         NSLayoutConstraint.activate([
@@ -499,7 +487,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         split.splitView.setPosition(220, ofDividerAt: 0)
 
         let savedPage = defaults.integer(forKey: "mainPage")
-        showPage([1, 2, 3, 4, 5, 6, 7, 8, 9].contains(savedPage) ? savedPage : 0)
+        showPage([0, 1, 2, 3, 4, 5].contains(savedPage) ? savedPage : 0)
         if ccSyncEnabled() { startCcSwitchFollow() }
         startIqCatalogWatch()
     }
@@ -836,7 +824,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     // MARK: - 表格
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === claudeTableView ? claudeProviders.count : providers.count
+        providers.count
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
@@ -848,8 +836,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let provider = tableView === claudeTableView ? claudeProviders[row] : providers[row]
-        let isCurrent = tableView === claudeTableView ? provider.id == claudeCurrentId : provider.id == currentId
+        let provider = providers[row]
+        let isCurrent = provider.id == currentId
 
         let name = NSTextField(labelWithString: provider.name)
         name.font = .systemFont(ofSize: 13, weight: isCurrent ? .medium : .regular)
@@ -1154,182 +1142,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     func setWatchState(_ running: Bool) {
         guard watchSwitch != nil else { return }
         watchSwitch.state = running ? .on : .off
-    }
-
-    func setClaudeWatchState(_ running: Bool) {
-        guard claudeWatchSwitch != nil else { return }
-        claudeWatchSwitch.state = running ? .on : .off
-    }
-
-    var claudeWatchIsOn: Bool { claudeWatchSwitch?.state == .on }
-
-    @objc private func claudeRowClicked() {
-        let row = claudeTableView.clickedRow >= 0 ? claudeTableView.clickedRow : claudeTableView.selectedRow
-        guard row >= 0, row < claudeProviders.count, !busy else { return }
-        let provider = claudeProviders[row]
-        if !provider.hasConfig {
-            setClaudeStatus("「\(provider.name)」请在 cc-switch 中切换")
-            return
-        }
-        if ccSwitchRunning {
-            let alert = NSAlert()
-            alert.messageText = "建议在 cc-switch 里切换"
-            alert.informativeText = """
-            cc-switch 正在运行。在那边点击「\(provider.name)」后，本 App 会重新打开 Claude Desktop，让新网关生效。
-            """
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "打开 cc-switch")
-            alert.addButton(withTitle: "强制切换")
-            alert.addButton(withTitle: "取消")
-            NSApp.activate(ignoringOtherApps: true)
-            let choice = alert.runModal()
-            if choice == .alertFirstButtonReturn {
-                self.openCcSwitch()
-                setClaudeStatus("请在 cc-switch 里点击「\(provider.name)」，本 App 会重新打开 Claude Desktop")
-                return
-            }
-            if choice == .alertSecondButtonReturn {
-                performClaudeSwitch(provider, force: true)
-            }
-            return
-        }
-        performClaudeSwitch(provider)
-    }
-
-    private func performClaudeSwitch(_ provider: ProviderSummary, force: Bool = false) {
-        setBusy(true, status: nil)
-        setClaudeStatus("正在切换到 \(provider.name)…")
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let result = try self.backend.claudeSwitch(provider.id, force: force)
-                NotificationCenter.default.post(name: .claudeConfigWrittenFromApp, object: nil)
-                DispatchQueue.main.async {
-                    self.setBusy(false)
-                    self.refreshClaude()
-                    let restarted = result.reload?.restarted == true
-                    self.setClaudeStatus(restarted
-                        ? "✔ 已切换到 \(provider.name)，Claude Desktop 已重新打开并置于最前"
-                        : "✔ 已写入 \(provider.name)，下次打开 Claude Desktop 时生效")
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.setBusy(false)
-                    self.setClaudeStatus("❌ \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
-    func refreshClaude() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let result = try self.backend.claudeList()
-                DispatchQueue.main.async {
-                    self.claudeProviders = result.providers
-                    self.claudeCurrentId = result.currentId
-                    self.claudeLive = result.live
-                    self.ccSwitchRunning = result.ccSwitchRunning ?? self.ccSwitchRunning
-                    self.claudeTableView?.reloadData()
-                    self.claudeTableHeight?.constant = self.tableHeight(self.claudeTableView, rows: result.providers.count)
-                    self.updateClaudeHeader()
-                    self.refreshSidebar()
-                }
-            } catch {
-                DispatchQueue.main.async { self.setClaudeStatus("❌ \(error.localizedDescription)") }
-            }
-        }
-    }
-
-    private func updateClaudeHeader() {
-        let provider = claudeProviders.first { $0.id == claudeCurrentId }
-        if let provider {
-            claudeHeaderLabel?.stringValue = provider.host.map { "\(provider.name) · \($0)" } ?? provider.name
-        } else {
-            claudeHeaderLabel?.stringValue = "(未知)"
-        }
-        var lines: [String] = []
-        if let host = claudeLive?.host { lines.append("实际网关: \(host)") }
-        claudeEffectiveLabel?.stringValue = lines.joined(separator: "   ")
-        replaceSecrets(in: claudeKeyHost, with: claudeLive?.token)
-        if let provider, let liveId = claudeLive?.liveProviderId, liveId != provider.id {
-            let liveName = claudeProviders.first { $0.id == liveId }?.name ?? "另一套网关"
-            claudeNote?.stringValue = "cc-switch 当前是「\(provider.name)」，桌面仍是「\(liveName)」。自动跟随会按 cc-switch 写回。"
-            claudeNote?.isHidden = false
-        } else {
-            claudeNote?.stringValue = ""
-            claudeNote?.isHidden = true
-        }
-    }
-
-    @objc private func reloadClaudeNow() {
-        guard !busy else { return }
-        setBusy(true, status: nil)
-        setClaudeStatus("正在重新打开 Claude Desktop…")
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let result = try self.backend.claudeReload()
-                DispatchQueue.main.async {
-                    self.setBusy(false)
-                    self.refreshClaude()
-                    self.setClaudeStatus(result.reload?.restarted == true
-                        ? "✔ Claude Desktop 已重新打开，正在使用当前网关"
-                        : "ℹ️ 当前没有运行中的 Claude Desktop，下次打开时生效")
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.setBusy(false)
-                    self.setClaudeStatus("❌ \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-
-    func autoReloadClaude(onDone: (() -> Void)? = nil) {
-        guard !busy else { onDone?(); return }
-        setBusy(true, status: nil)
-        setClaudeStatus("正在按 cc-switch 的当前供应商同步 Claude Desktop…")
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let result = try self.backend.claudeSync()
-                NotificationCenter.default.post(name: .claudeConfigWrittenFromApp, object: nil)
-                DispatchQueue.main.async {
-                    self.setBusy(false)
-                    self.refreshClaude()
-                    let name = result.current?.name ?? "当前供应商"
-                    if let reason = result.reason, result.aligned != true {
-                        self.setClaudeStatus(reason)
-                    } else if result.reload?.restarted == true {
-                        self.setClaudeStatus("⚡ 已按 cc-switch 的「\(name)」重新打开 Claude Desktop，并置于最前")
-                    } else if result.applied == true {
-                        self.setClaudeStatus("⚡ 已按 cc-switch 的「\(name)」写回网关，下次打开 Claude Desktop 时生效")
-                    } else {
-                        self.setClaudeStatus("已与 cc-switch 的「\(name)」一致")
-                    }
-                    onDone?()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.setBusy(false)
-                    self.setClaudeStatus("❌ 自动跟随失败: \(error.localizedDescription)")
-                    onDone?()
-                }
-            }
-        }
-    }
-
-    @objc private func toggleClaudeWatch() {
-        let enabled = claudeWatchSwitch.state == .on
-        defaults.set(enabled, forKey: "watchClaudeEnabled")
-        NotificationCenter.default.post(name: .claudeWatchToggled, object: nil)
-        setClaudeStatus(enabled ? "已开启自动跟随：在 cc-switch 里切换后会重新打开 Claude Desktop" : "已关闭自动跟随")
-    }
-
-    private func setClaudeStatus(_ text: String) {
-        claudeStatusLabel?.set(text)
     }
 
     @objc private func scopeChanged() {
@@ -1700,13 +1512,26 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     func selectPage(_ index: Int) {
-        let page = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].contains(index) ? index : 0
+        let page = [0, 1, 2, 3, 4, 5].contains(index) ? index : 0
         defaults.set(page, forKey: "mainPage")
         showPage(page)
     }
 
+    /// 从菜单直接跳到合并页里的某个分段。
+    func selectQuotaTab(_ tab: Int) {
+        defaults.set(min(max(tab, 0), 1), forKey: "quotaTab")
+        quotaMerged?.select(tab)
+        refreshSidebar()
+    }
+
+    func selectGatewayTab(_ tab: Int) {
+        defaults.set(min(max(tab, 0), 2), forKey: "gatewayTab")
+        gatewayMerged?.select(tab)
+        refreshSidebar()
+    }
+
     private func showPage(_ index: Int) {
-        let pages = [codexPane, claudePane, ccPane, iqPane, quotaPane, clinePane, grokPane, speedPane, todayPane, qoderPane]
+        let pages = [codexPane, ccPane, iqPane, quotaMergePane, gatewayMergePane, speedPane]
         let visible = pane(for: index)
         for pane in pages {
             pane?.isHidden = pane !== visible
@@ -1716,27 +1541,20 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             scrollToTop(scroll)
             DispatchQueue.main.async { [weak self] in self?.scrollToTop(scroll) }
         }
-        if index == 3 { refreshIq() }
-        if index == 4 { quotaController?.onShow() }
-        if index == 5 { clineController?.onShow() }
-        if index == 6 { grokController?.onShow() }
-        if index == 7 { speedController?.onShow() } else { speedController?.onHide() }
-        if index == 8 { todayController?.onShow() }
-        if index == 9 { qoderController?.onShow() }
+        if index == 2 { refreshIq() }
+        if index == 3 { quotaMerged?.onShow() }
+        if index == 4 { gatewayMerged?.onShow() }
+        if index == 5 { speedController?.onShow() } else { speedController?.onHide() }
         refreshSidebar()
     }
 
     private func pane(for index: Int) -> NSView? {
         switch index {
         case 1: return ccPane
-        case 2: return claudePane
-        case 3: return iqPane
-        case 4: return quotaPane
-        case 5: return clinePane
-        case 6: return grokPane
-        case 7: return speedPane
-        case 8: return todayPane
-        case 9: return qoderPane
+        case 2: return iqPane
+        case 3: return quotaMergePane
+        case 4: return gatewayMergePane
+        case 5: return speedPane
         default: return codexPane
         }
     }
@@ -1752,28 +1570,31 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     private func refreshSidebar() {
         sidebar?.setDetail(page: 0, codexSidebarDetail())
-        sidebar?.setDetail(page: 2, claudeSidebarDetail())
         sidebar?.setDetail(page: 1, ccSidebarDetail())
-        sidebar?.setDetail(page: 3, iqSidebarDetail())
-        sidebar?.setDetail(page: 4, quotaController?.sidebarDetail() ?? "查询剩余额度")
-        sidebar?.setDetail(page: 5, clineController?.sidebarDetail() ?? "查询剩余额度")
-        sidebar?.setDetail(page: 6, grokController?.sidebarDetail() ?? "本机网关")
-        sidebar?.setDetail(page: 7, speedController?.sidebarDetail() ?? "未测速")
-        sidebar?.setDetail(page: 8, todayController?.sidebarDetail() ?? "独立网关")
-        sidebar?.setDetail(page: 9, qoderController?.sidebarDetail() ?? "Qoder 网络")
+        sidebar?.setDetail(page: 2, iqSidebarDetail())
+        sidebar?.setDetail(page: 3, quotaSidebarDetail())
+        sidebar?.setDetail(page: 4, gatewaySidebarDetail())
+        sidebar?.setDetail(page: 5, speedController?.sidebarDetail() ?? "未测速")
+    }
+
+    private func quotaSidebarDetail() -> String {
+        if quotaMerged?.currentIndex == 1 {
+            return "ClinePass · \(clineController?.sidebarDetail() ?? "查询剩余额度")"
+        }
+        return "OpenCode · \(quotaController?.sidebarDetail() ?? "查询剩余额度")"
+    }
+
+    private func gatewaySidebarDetail() -> String {
+        switch gatewayMerged?.currentIndex ?? 0 {
+        case 1: return "Today · \(todayController?.sidebarDetail() ?? "独立网关")"
+        case 2: return "Qoder · \(qoderController?.sidebarDetail() ?? "网络状态")"
+        default: return "Grok · \(grokController?.sidebarDetail() ?? "本机网关")"
+        }
     }
 
     private func iqSidebarDetail() -> String {
         if let model = iqModelPopup?.titleOfSelectedItem, !model.isEmpty { return model }
         return "鹈鹕骑车"
-    }
-
-    private func claudeSidebarDetail() -> String {
-        let effectiveId = claudeLive?.liveProviderId ?? claudeCurrentId
-        if let provider = claudeProviders.first(where: { $0.id == effectiveId }) {
-            return provider.host.map { "\(provider.name) · \($0)" } ?? provider.name
-        }
-        return "跟随 cc-switch"
     }
 
     private func codexSidebarDetail() -> String {
@@ -2162,7 +1983,6 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         reloadButton.isEnabled = !value
         iqRunButton?.isEnabled = !value
         tableView.isEnabled = !value
-        claudeTableView?.isEnabled = !value
         if value { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         addRemoteButton?.isEnabled = !value
         if let status { setStatus(status) }
@@ -2424,6 +2244,4 @@ final class ProviderRowView: NSTableRowView {
 extension Notification.Name {
     static let watchToggled = Notification.Name("ai-toolbox.watchToggled")
     static let configWrittenFromApp = Notification.Name("ai-toolbox.configWrittenFromApp")
-    static let claudeWatchToggled = Notification.Name("ai-toolbox.claudeWatchToggled")
-    static let claudeConfigWrittenFromApp = Notification.Name("ai-toolbox.claudeConfigWrittenFromApp")
 }

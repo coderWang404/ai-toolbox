@@ -6,6 +6,7 @@ final class GoQuotaPane: NSObject {
     var onDetail: ((String) -> Void)?
 
     private let backend: Backend
+    private let embedded: Bool
     private var keys: [GoKeyPublic] = []
     private var report: GoQuotaReport?
     private var busy = false
@@ -22,8 +23,9 @@ final class GoQuotaPane: NSObject {
     private let queryButton = NSButton()
     private let spinner = NSProgressIndicator()
 
-    init(backend: Backend) {
+    init(backend: Backend, embedded: Bool = false) {
         self.backend = backend
+        self.embedded = embedded
         super.init()
         root = makeRoot()
     }
@@ -135,12 +137,12 @@ final class GoQuotaPane: NSObject {
         body.spacing = 22
         renderKeys()
         renderResults()
-        let page = PageChrome.scroll(
+        if embedded { return PageChrome.embeddedScroll(content: body) }
+        return PageChrome.scroll(
             title: "OpenCode 额度",
             subtitle: "查询每把密钥的官方三窗口额度。选中一把后，可以把它写进本机的 cc-switch 和 OpenCode。",
             content: body
         )
-        return page
     }
 
     private func configureField(_ field: NSTextField, placeholder: String, mono: Bool = false) {

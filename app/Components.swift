@@ -653,6 +653,21 @@ enum PageChrome {
         stack.setCustomSpacing(4, after: heading)
         stack.setCustomSpacing(22, after: detail)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        return buildScroll(stack: stack, content: content, topInset: 24)
+    }
+
+    /// 合并页里的子页：不画自己的标题，只保留正文和滚动。
+    static func embeddedScroll(content: NSView) -> NSScrollView {
+        let stack = NSStackView(views: [content])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 24, right: 0)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return buildScroll(stack: stack, content: content, topInset: 6)
+    }
+
+    private static func buildScroll(stack: NSStackView, content: NSView, topInset: CGFloat) -> NSScrollView {
         let document = FlippedDocumentView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
@@ -673,7 +688,7 @@ enum PageChrome {
             document.topAnchor.constraint(equalTo: clip.topAnchor),
             document.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             document.widthAnchor.constraint(equalTo: clip.widthAnchor),
-            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 24),
+            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: topInset),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 28),
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -28),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24),

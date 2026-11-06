@@ -1,28 +1,28 @@
 # AI 工具箱
 
-本地 AI 小工具集合。核心能力是在不重启 Codex 应用的前提下，热切换 cc-switch 管理的第三方模型供应商；此外还包含 Claude Desktop 跟随、cc-switch 远程同步、Today / Grok Bot 本地网关、额度查询和网络测速。
+本地 AI 小工具集合。核心能力是在不重启 Codex 应用的前提下，热切换 cc-switch 管理的第三方模型供应商；此外还包含 cc-switch 远程同步、OpenCode / ClinePass 额度查询、Grok Bot 与 Today 本地网关、Qoder 网络检查和网络测速。
 
 ## 包含的工具
 
 | 页面 | 作用 |
 | --- | --- |
 | Codex | 供应商热切换、自动跟随、远程同步 |
-| Claude Desktop | 跟随 cc-switch 的桌面供应商，切换后重新打开应用 |
 | cc-switch | 以本机为真源，实时同步远程整库 |
 | 智商测试 | 用统一题目横向比较各供应商模型 |
-| OpenCode 额度 | OpenCode Go 多密钥三窗口额度，可把密钥写入本机应用 |
-| ClinePass 额度 | ClinePass 多密钥三窗口额度和余额 |
-| Grok Bot | 读取本机登录态，在本机启动 OpenAI 兼容网关 |
+| 额度 | 页内分段：OpenCode 额度 / ClinePass 额度 |
+| 网关与网络 | 页内分段：Grok Bot / Today / Qoder 网络 |
 | 网络测速 | 出口信息、延迟、上下行测速 |
-| Qoder 网络 | 本机 Qoder CN + 远程机器的 DNS/hosts、Clash、HTTPDNS 状态与管理 |
-| Today | 独立模块：通过 CDP 使用 Today.app，导出 OpenAI 兼容网关 |
+
+「额度」把 OpenCode Go 和 ClinePass 的多密钥查询放在同一页，用顶部分段切换；
+「网关与网络」把 Grok Bot、Today 两个本机 OpenAI 兼容网关和 Qoder 网络检查放在同一页，
+同样用分段切换。两页各自记住上次停留的分段，切换页面不会重置。
 
 - **桌面 App**：`AI 工具箱.app`（原生菜单栏/窗口应用，内置全部逻辑，双击即用）
 - **命令行版**：`ai-toolbox` CLI（适合脚本/终端用户）
 
 ![界面](docs/screenshot.png)
 
-> 截图来自旧版 6 页界面；当前侧栏已有 9 页，Today 等新页面尚未重新截图。
+> 截图来自旧版 6 页界面；当前侧栏是 6 项（Codex、cc-switch、智商测试、额度、网关与网络、网络测速），尚未重新截图。
 
 ## 它解决什么问题
 
@@ -83,7 +83,6 @@ ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换�
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
 ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
 ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
-ai-toolbox claude-list             # 列出 Claude Desktop 供应商
 ai-toolbox iq-list                 # 列出可用于智商测试的供应商
 ai-toolbox go-quota                # 查询 OpenCode Go 三窗口额度
 ai-toolbox cline-quota             # 查询 ClinePass 三窗口额度和余额

@@ -6,6 +6,7 @@ final class QoderNetworkPane: NSObject {
     var onDetail: ((String) -> Void)?
 
     private let backend: Backend
+    private let embedded: Bool
     private var statusInfo: QoderStatusResult?
     private var remoteReport: QoderRemoteReport?
     private var busy = false
@@ -36,8 +37,9 @@ final class QoderNetworkPane: NSObject {
     private var localSection: QoderSection!
     private var remoteSection: QoderSection!
 
-    init(backend: Backend) {
+    init(backend: Backend, embedded: Bool = false) {
         self.backend = backend
+        self.embedded = embedded
         super.init()
         root = makeRoot()
     }
@@ -57,7 +59,7 @@ final class QoderNetworkPane: NSObject {
     }
 
     func sidebarDetail() -> String {
-        guard let statusInfo else { return "读取 Qoder 网络" }
+        guard let statusInfo else { return "网络状态" }
         let local = statusInfo.health == "ok" ? "本机正常" : "本机需检查"
         if let remoteReport, let summary = remoteReport.summary {
             return "\(local) · 远程 \(summary.ok)/\(summary.total)"
@@ -157,6 +159,7 @@ final class QoderNetworkPane: NSObject {
         for view in [status as NSView, issuesLabel as NSView, localSection as NSView, remoteSection as NSView, actionStatus as NSView] {
             view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
         }
+        if embedded { return PageChrome.embeddedScroll(content: body) }
         return PageChrome.scroll(
             title: "Qoder 网络",
             subtitle: "本机 Qoder CN 与远程机器的 DNS、Clash、HTTPDNS 状态；详情按需展开。",

@@ -306,20 +306,6 @@ final class Backend {
         return result.remote
     }
 
-    func claudeList() throws -> ClaudeListResult {
-        try decode(ClaudeListResult.self, from: run(["claude-list"], timeout: 20, withSecrets: true))
-    }
-
-    func claudeSwitch(_ identifier: String, force: Bool = false) throws -> ClaudeSwitchResult {
-        var args = ["claude-switch", identifier]
-        if force { args.append("--force") }
-        return try decode(ClaudeSwitchResult.self, from: run(args, timeout: 40))
-    }
-
-    func claudeReload() throws -> ClaudeReloadResult {
-        try decode(ClaudeReloadResult.self, from: run(["claude-reload"], timeout: 40))
-    }
-
     func iqList() throws -> IqListResult {
         try decode(IqListResult.self, from: run(["iq-list"], timeout: 45))
     }
@@ -431,10 +417,6 @@ final class Backend {
             throw BackendError.commandFailed(Self.redacted(payloadError))
         }
         return outData
-    }
-
-    func claudeSync() throws -> ClaudeSyncResult {
-        try decode(ClaudeSyncResult.self, from: run(["claude-sync"], timeout: 40))
     }
 
     func ccSwitchFingerprint() throws -> String {

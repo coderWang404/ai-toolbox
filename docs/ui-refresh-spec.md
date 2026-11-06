@@ -1,4 +1,4 @@
-> 状态说明（2026-11）：这份 spec 写于只有 4 个页面的时期。现在侧栏已有 10 页（编号 0–9，新增 OpenCode 额度、ClinePass 额度、Grok Bot、网络测速、Today、Qoder 网络）。split view、分组卡片、source list、深浅色已经落地；页面标题顶距、切页淡入、拆 Pages/*.swift、8 张验收截图仍未完成。修改界面时请以当前 10 页结构为准。
+> 状态说明（2026-11）：这份 spec 写于只有 4 个页面的时期。2026-11 做过一次结构合并：Claude Desktop 页删除；OpenCode 与 ClinePass 额度合成「额度」页，Grok Bot / Today / Qoder 网络合成「网关与网络」页，两页都用顶部分段切换。当前侧栏 6 项（编号 0–5：Codex、cc-switch、智商测试、额度、网关与网络、网络测速）。下文关于 Claude Desktop 页和旧页面编号的段落只作历史记录，不再对应当前界面。split view、分组卡片、source list、深浅色已经落地；页面标题顶距、切页淡入、拆 Pages/*.swift、验收截图仍未完成。
 
 # 界面重做 spec：贴近 macOS 系统设置的风格
 

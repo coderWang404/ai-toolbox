@@ -6,6 +6,7 @@ final class GrokBotPane: NSObject {
     var onDetail: ((String) -> Void)?
 
     private let backend: Backend
+    private let embedded: Bool
     private var statusInfo: GrokStatus?
     private var busy = false
     private var loaded = false
@@ -24,8 +25,9 @@ final class GrokBotPane: NSObject {
     private let spinner = NSProgressIndicator()
     private var gatewayRunning = false
 
-    init(backend: Backend) {
+    init(backend: Backend, embedded: Bool = false) {
         self.backend = backend
+        self.embedded = embedded
         super.init()
         root = makeRoot()
     }
@@ -116,6 +118,7 @@ final class GrokBotPane: NSObject {
         renderAccount()
         renderAgents()
         renderGateway()
+        if embedded { return PageChrome.embeddedScroll(content: body) }
         return PageChrome.scroll(
             title: "Grok Bot",
             subtitle: "把本机 Grok Bot 登录转成可查看的助手列表，以及一个本机 OpenAI 兼容网关。",

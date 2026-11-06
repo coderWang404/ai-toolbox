@@ -16,19 +16,6 @@ import { watchConfig } from "../src/watcher.mjs";
 import { loadRemotes, syncRemotes, inspectRemotes } from "../src/remote-sync.mjs";
 import { syncCcSwitch } from "../src/ccswitch-remote.mjs";
 import { localFingerprint } from "../src/ccswitch-snapshot.mjs";
-import {
-  listClaudeDesktopProviders,
-  currentClaudeDesktopId,
-  findClaudeDesktopProvider,
-  readAppliedProfile,
-  applyClaudeDesktopProvider,
-  syncClaudeDesktopCurrent,
-  restartClaudeDesktop,
-  syncDesktopFromCcSwitch,
-  claudeDesktopSummary,
-  claudeDesktopProfilePath,
-  claudeDesktopRunning,
-} from "../src/claude-desktop.mjs";
 import { findCodexBinary, readEffectiveConfig } from "../src/verify-client.mjs";
 import { findIqProvider, listIqProviders, publicIqProvider, resolveThinking } from "../src/iq-catalog.mjs";
 import { iqTopic, runIqTest } from "../src/iq-runtime.mjs";
@@ -73,11 +60,6 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
   ai-toolbox remote-status         查看远程正在使用的供应商和密钥尾号
   ai-toolbox sync-ccswitch         把本机 cc-switch 配置同步到远程（连不上则等待重试）
-  ai-toolbox claude-list            列出 Claude Desktop 供应商
-  ai-toolbox claude-current         查看 Claude Desktop 正在使用的网关
-  ai-toolbox claude-switch <名称>   切换 Claude Desktop 供应商并重新打开应用
-  ai-toolbox claude-reload          cc-switch 已切换后，重新打开 Claude Desktop
-  ai-toolbox claude-sync            以 cc-switch 当前项为准，写回桌面网关并在需要时重新打开
   ai-toolbox iq-list               列出可用 OpenAI 协议的供应商和模型
   ai-toolbox iq-run <供应商>       用最小运行时测试模型（--model 指定模型）
   ai-toolbox go-keys               列出本机保存的 OpenCode Go 密钥（只显示尾号）
@@ -503,107 +485,6 @@ async function cmdRemoteStatus(opts) {
   return { command: "remote-status", remote };
 }
 
-function claudeLiveMatch(providers, profile) {
-  if (!profile?.baseUrl) return null;
-  return providers.find((item) => item.baseUrl === profile.baseUrl && item.tokenTail === profile.tokenTail)
-    ?? providers.find((item) => item.baseUrl === profile.baseUrl)
-    ?? null;
-}
-
-async function cmdClaudeList(opts) {
-  const providers = listClaudeDesktopProviders();
-  const currentId = currentClaudeDesktopId();
-  const profile = readAppliedProfile({ includeSecrets: opts.secrets });
-  const live = claudeLiveMatch(providers, profile);
-  opts.log(`\nClaude Desktop 供应商（${providers.length}）`);
-  for (const provider of providers) {
-    const mark = provider.id === currentId ? "●" : "○";
-    opts.log(`  ${mark} ${provider.name}  ${provider.host ?? "官方登录"}  ${provider.model ?? ""}`.trimEnd());
-  }
-  if (profile?.host) opts.log(`\n正在使用: ${profile.host} · key …${profile.tokenTail ?? "-"}`);
-  return {
-    command: "claude-list",
-    currentId,
-    providers: providers.map((provider) => claudeDesktopSummary(provider, { includeSecrets: opts.secrets })),
-    live: profile ? { ...profile, liveProviderId: live?.id ?? null } : null,
-    ccSwitchRunning: isCcSwitchRunning(),
-    profilePath: claudeDesktopProfilePath(),
-  };
-}
-
-async function cmdClaudeCurrent(opts) {
-  const providers = listClaudeDesktopProviders();
-  const currentId = currentClaudeDesktopId();
-  const current = providers.find((item) => item.id === currentId) ?? null;
-  const profile = readAppliedProfile({ includeSecrets: opts.secrets });
-  const live = claudeLiveMatch(providers, profile);
-  opts.log(`\ncc-switch 记录: ${current ? `${current.name} (${current.id})` : "(未知)"}`);
-  if (profile) opts.log(`桌面网关: ${profile.host ?? "-"} · key …${profile.tokenTail ?? "-"}`);
-  return {
-    command: "claude-current",
-    current: current ? { id: current.id, name: current.name } : null,
-    profile,
-    liveProviderId: live?.id ?? null,
-    running: claudeDesktopRunning(),
-  };
-}
-
-async function cmdClaudeSwitch(query, opts) {
-  const provider = findClaudeDesktopProvider(query);
-  if (!provider) throw new Error(`找不到 Claude Desktop 供应商「${query}」。可用: ai-toolbox claude-list`);
-  if (!provider.hasConfig) {
-    throw new Error(`「${provider.name}」不能写成直连网关。请在 cc-switch 里切换官方登录或需要本地代理的供应商。`);
-  }
-  if (isCcSwitchRunning() && !opts.force) {
-    throw new Error(
-      `cc-switch 正在运行。请在 cc-switch 里点击「${provider.name}」，本工具的自动跟随会重新打开 Claude Desktop。\n` +
-        `  若仍要由此处切换，请加 --force`,
-    );
-  }
-  opts.log(`\n🔀 Claude Desktop → ${provider.name}`);
-  if (opts.dryRun) {
-    opts.log(`  [dry-run] 将写入 ${provider.host}`);
-    return { command: "claude-switch", dryRun: true, provider: claudeDesktopSummary(provider, { includeSecrets: opts.secrets }) };
-  }
-  const applied = applyClaudeDesktopProvider(provider);
-  syncClaudeDesktopCurrent(provider.id);
-  opts.log(`  已写入网关 ${applied.host} · key …${applied.tokenTail ?? "-"}`);
-  let reload = null;
-  if (opts.reload) reload = await restartClaudeDesktop({ log: opts.log });
-  return {
-    command: "claude-switch",
-    provider: claudeDesktopSummary(provider, { includeSecrets: opts.secrets }),
-    profile: opts.secrets ? applied : { ...applied, token: undefined },
-    synced: true,
-    reload,
-  };
-}
-
-async function cmdClaudeSync(opts) {
-  const result = await syncDesktopFromCcSwitch({ log: opts.log });
-  if (result.current) opts.log(`\n以 cc-switch 为准: ${result.current.name}`);
-  if (result.reason) opts.log(`  ${result.reason}`);
-  else if (!result.applied && !result.reload) opts.log("  桌面网关已与 cc-switch 一致");
-  return { command: "claude-sync", ...result };
-}
-
-async function cmdClaudeReload(opts) {
-  const providers = listClaudeDesktopProviders();
-  const currentId = currentClaudeDesktopId();
-  const current = providers.find((item) => item.id === currentId) ?? null;
-  const profile = readAppliedProfile({ includeSecrets: opts.secrets });
-  if (current) opts.log(`\n当前: ${current.name} · ${profile?.host ?? "-"}`);
-  const reload = opts.dryRun
-    ? { dryRun: true, wasRunning: false, restarted: false, pid: null }
-    : await restartClaudeDesktop({ log: opts.log });
-  return {
-    command: "claude-reload",
-    current: current ? { id: current.id, name: current.name } : null,
-    profile,
-    reload,
-  };
-}
-
 async function cmdIqList(opts) {
   const providers = (await listIqProviders()).map(publicIqProvider);
   for (const provider of providers) {
@@ -943,22 +824,6 @@ async function main() {
       break;
     case "watch":
       result = await cmdWatch(opts);
-      break;
-    case "claude-list":
-      result = await cmdClaudeList(opts);
-      break;
-    case "claude-current":
-      result = await cmdClaudeCurrent(opts);
-      break;
-    case "claude-switch":
-      if (!arg) throw new Error("用法: ai-toolbox claude-switch <名称/ID>");
-      result = await cmdClaudeSwitch(arg, opts);
-      break;
-    case "claude-reload":
-      result = await cmdClaudeReload(opts);
-      break;
-    case "claude-sync":
-      result = await cmdClaudeSync(opts);
       break;
     case "iq-list":
       result = await cmdIqList(opts);
