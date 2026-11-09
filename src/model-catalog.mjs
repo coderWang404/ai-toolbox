@@ -11,10 +11,14 @@ import { buildCatalog } from "./catalog.mjs";
 import { codexHome } from "./paths.mjs";
 
 const NON_CHAT_PATTERNS = [
-  /(^|[/_.-])(tts|asr|whisper|audio|speech|realtime|embed|embedding|embeddings|rerank|moderation)([/_.-]|$)/i,
+  /(^|[/_.-])(tts|asr|whisper|audio|speech|realtime|live|transcribe|transcription)([/_.-]|$)/i,
+  /(^|[/_.-])(embed|embedding|embeddings|rerank|moderation)([/_.-]|$)/i,
   /(^|[/_.-])(image|images|dall-?e|sora|video|ocr)([/_.-]|$)/i,
-  /(^|[/_.-])(vision-only|guard|classifier)([/_.-]|$)/i,
+  /(^|[/_.-])(vision-only|guard|classifier|search-api)([/_.-]|$)/i,
 ];
+
+/** 形如 -2025-04-14 的快照版本；同一模型既有别名又有快照时只保留别名。 */
+const DATED_SNAPSHOT = /-\d{4}-\d{2}-\d{2}$/;
 
 const MAX_CATALOG_MODELS = 40;
 
@@ -40,20 +44,43 @@ export function isChatModel(id) {
  * 过滤 + 排序：配置里的 model 排第一，然后按供应商返回顺序；
  * 过滤掉音频 / 向量 / 图像等非对话模型，并限制条目数量。
  */
-export function selectCatalogModels(ids, { preferred = null, limit = MAX_CATALOG_MODELS } = {}) {
+function versionScore(slug) {
+  const match = String(slug).match(/gpt-(\d+(?:\.\d+)?)/i);
+  return match ? Number.parseFloat(match[1]) : 0;
+}
+
+export function selectCatalogModels(ids, { preferred = null, reference = null, limit = MAX_CATALOG_MODELS } = {}) {
+  const unique = [];
   const seen = new Set();
+  for (const raw of ids ?? []) {
+    const id = String(raw ?? "").trim();
+    if (!id || seen.has(id) || !isChatModel(id)) continue;
+    seen.add(id);
+    unique.push(id);
+  }
+  // 去掉带日期的快照（保留无日期的别名），否则 40 个名额会被 gpt-4.1-2025-xx 这类占满
+  const bases = new Set(unique.map((id) => id.replace(DATED_SNAPSHOT, "")));
+  const shrunk = unique.filter((id) => !DATED_SNAPSHOT.test(id) || !bases.has(id.replace(DATED_SNAPSHOT, "")));
+
+  // Codex 认识的模型（models_cache 里有的）优先，避免被供应商按字母序返回的长尾挤掉
+  const known = [];
+  const unknown = [];
+  for (const id of shrunk) {
+    if (reference instanceof Map && reference.has(id.toLowerCase())) known.push(id);
+    else unknown.push(id);
+  }
+  const byVersion = (a, b) => versionScore(b) - versionScore(a) || a.localeCompare(b);
+  known.sort(byVersion);
+  unknown.sort(byVersion);
+
   const out = [];
   const push = (id) => {
     const value = String(id ?? "").trim();
-    if (!value || seen.has(value)) return;
-    seen.add(value);
+    if (!value || out.includes(value)) return;
     out.push(value);
   };
   if (preferred) push(preferred);
-  for (const id of ids ?? []) {
-    if (!isChatModel(id)) continue;
-    push(id);
-  }
+  for (const id of [...known, ...unknown]) push(id);
   return out.slice(0, limit);
 }
 
@@ -184,7 +211,7 @@ export function buildCatalogFromModelIds(
   ids,
   { configText, apiFormat, preferred = null, reference = new Map(), requiredEffort = null } = {},
 ) {
-  const selected = selectCatalogModels(ids, { preferred });
+  const selected = selectCatalogModels(ids, { preferred, reference });
   if (!selected.length) return null;
   const catalog = buildCatalog({
     settings: { modelCatalog: { models: selected.map((model) => ({ model })) } },
