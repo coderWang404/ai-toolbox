@@ -1043,6 +1043,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     if let warnings = result.warnings, !warnings.isEmpty {
                         parts.append("⚠️ " + warnings.joined(separator: "；"))
                     }
+                    if let projectState = result.projectState {
+                        if projectState.repaired == true, let restored = projectState.restored {
+                            parts.append("已恢复 \(restored.projects ?? 0) 个 Codex 项目")
+                        } else if projectState.hint != nil {
+                            parts.append("Codex 退出后自动恢复项目列表")
+                        }
+                    }
                     if let remote = self.remoteSummary(result.remote) { parts.append(remote) }
                     self.setStatus(parts.joined(separator: " · "))
                 }
@@ -1078,6 +1085,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                         text = "✔ 已重启 app-server，点一下任意对话即生效"
                     } else {
                         text = "ℹ️ 当前没有运行中的 app-server，下次启动 Codex 时生效"
+                    }
+                    if let projectState = result.projectState, projectState.repaired == true,
+                       let restored = projectState.restored {
+                        text += " · 已恢复 \(restored.projects ?? 0) 个 Codex 项目"
                     }
                     if let remote = self.remoteSummary(result.remote) { text += " · \(remote)" }
                     self.setStatus(text)

@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { codexConfigPath } from "./paths.mjs";
 import { reloadAppServers, discoverCodexProcesses, selectTargets } from "./reloader.mjs";
 import { syncRemotes } from "./remote-sync.mjs";
+import { preserveProjectState, repairProjectState } from "./codex-project-state.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -39,6 +40,7 @@ export async function watchConfig({
   }
   log(`👀 正在监控 ${codexConfigPath()}`);
   log(`   切换供应商（cc-switch 界面或 ai-toolbox switch）后会自动重启 Codex 的 app-server。`);
+  log(`   Codex 退出时会自动把被账号隔离寄存的项目状态写回。`);
   log(`   按 Ctrl-C 退出。\n`);
 
   for (;;) {
@@ -69,6 +71,9 @@ export async function watchConfig({
       if (once) return { targets, outcomes: [] };
       continue;
     }
+
+    // 切换供应商会连带换掉登录态，桌面端可能把项目列表寄存；先快照再重启。
+    const preserved = preserveProjectState({ log });
     const result = await reloadAppServers({ scope, drainTimeoutMs, hard, log });
     // 先让本机热重启生效，再做 SSH 同步：远程不可达时不应该拖住本机。
     if (syncRemote) {
@@ -78,6 +83,9 @@ export async function watchConfig({
         log(`   ⚠️  远程同步失败: ${err.message}`);
       }
     }
+    const projectState = repairProjectState({ log });
+    result.preserved = preserved;
+    result.projectState = projectState;
     const killed = result.outcomes.filter((o) => o.outcome === "killed").length;
     if (result.outcomes.length) {
       log(

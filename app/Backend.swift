@@ -297,6 +297,18 @@ final class Backend {
         return try decode(ReloadResult.self, from: run(args, timeout: 180))
     }
 
+    /// 查看 Codex 项目状态是否被账号隔离寄存。
+    func projectState() throws -> ProjectStateReport {
+        try decode(ProjectStateReport.self, from: run(["project-state"], timeout: 30))
+    }
+
+    /// 把被寄存的项目 / 会话归属恢复到 Codex 界面（Codex 需退出；force 允许运行中写入）。
+    func repairProjects(force: Bool = false) throws -> ProjectStateReport {
+        var args = ["repair-projects"]
+        if force { args.append("--force") }
+        return try decode(ProjectStateReport.self, from: run(args, timeout: 60))
+    }
+
     func doctor() throws -> DoctorResult {
         try decode(DoctorResult.self, from: run(["doctor"], timeout: 40))
     }

@@ -81,6 +81,8 @@ ai-toolbox current                 # 查看当前供应商 + 实际生效配置 
 ai-toolbox switch <名称或 ID>       # 切换供应商并热重启 Codex（核心命令）
 ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换后用这个）
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
+ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔离寄存
+ai-toolbox repair-projects         # 把被寄存的项目/会话归属恢复到 Codex（Codex 需退出）
 ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
 ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
 ai-toolbox iq-list                 # 列出可用于智商测试的供应商
@@ -132,6 +134,31 @@ ai-toolbox doctor                  # 环境自检
 - 本工具复刻了 cc-switch 写入 `config.toml` 的完整流程（通用配置合并 → bearer token 注入 →
   模型目录生成），并用一次性 app-server 实例校验后再切换，保证与 cc-switch 原生产物一致。
 
+## 切换后 Codex 项目列表消失？已内置保护
+
+Codex 桌面版从 0.157 起把项目列表和「会话 → 项目」归属按 ChatGPT 账号隔离，存在
+`~/.codex/.codex-global-state.json` 的 `electron-account-renderer-state-v1` 里。
+切换第三方供应商 / 账号时，登录态会变成「未登录」或换成另一个账号，桌面端就把这些状态
+从活动状态删掉、塞进 `inactive[旧账号 hash]`，界面上表现为**项目全丢、只剩对话**。
+数据其实没删，只是被寄存了。
+
+本工具的 `switch` / `reload` / `watch` 会自动：
+
+1. 切换前把整份状态快照到 `~/.ai-toolbox/codex-project-state/`（保留最近 10 份）；
+2. 切换后（或 Codex 退出后）把寄存的项目状态写回活动状态；
+3. 移除账号隔离层 —— 项目从此对任何账号、包括未登录状态都可见；
+4. 同一目录的重复项目合并成一个。
+
+桌面 App 会监听 Codex 退出事件自动恢复；菜单栏「Codex」分组里也有
+**修复项目列表（退出 Codex 后）**。
+
+手动恢复：
+
+```bash
+ai-toolbox project-state     # 先看是否被寄存（active / snapshots 数量）
+ai-toolbox repair-projects   # Codex 完全退出后执行；--dry-run 只预览
+```
+
 ## 与 cc-switch 的协作方式（重要）
 
 **推荐工作流：在 cc-switch 里切换供应商 + 本 App 开「自动跟随」。** 两边状态永远一致，不会出问题。
@@ -154,7 +181,7 @@ cc-switch 可能把这份配置回填到"它以为的当前卡片"，造成**卡
 ## 测试与构建
 
 ```bash
-npm test                 # Node 单元 + CLI 集成测试（35 项）
+npm test                 # Node 单元 + CLI 集成测试（43 项）
 npm run typecheck        # swiftc -typecheck
 npm run build            # 构建 dist/AI 工具箱.app（macOS 14+）
 ```

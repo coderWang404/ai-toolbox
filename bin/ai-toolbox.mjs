@@ -48,6 +48,11 @@ import {
 } from "../src/today-gateway.mjs";
 import { readFileSync } from "node:fs";
 import { codexConfigPath, codexHome, ccSwitchDbPath } from "../src/paths.mjs";
+import {
+  preserveProjectState,
+  repairProjectState,
+  projectStateReport,
+} from "../src/codex-project-state.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -56,6 +61,8 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox current               查看当前供应商与生效配置
   ai-toolbox switch <名称/ID>      切换供应商并热重启 Codex（核心命令）
   ai-toolbox reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
+  ai-toolbox project-state         查看 Codex 项目状态是否被账号隔离寄存
+  ai-toolbox repair-projects       把被寄存的项目/会话归属恢复到 Codex 界面（Codex 需退出）
   ai-toolbox watch                 持续监控配置，切换后自动热重启（推荐常驻）
   ai-toolbox sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
   ai-toolbox remote-status         查看远程正在使用的供应商和密钥尾号
@@ -388,6 +395,11 @@ async function cmdSwitch(query, opts) {
   }
 
   log(`\n🔀 切换到 ${fmtCurrent(provider)}`);
+
+  // 切换供应商常常连带换掉 auth / ChatGPT 登录态，桌面端会把项目列表按账号寄存。
+  // 先留一份本地快照，切换后再尝试恢复。
+  const preserved = preserveProjectState({ log });
+
   const common = getCodexCommonConfig();
   const result = await switchProvider({
     provider,
@@ -400,7 +412,7 @@ async function cmdSwitch(query, opts) {
   if (opts.dryRun) {
     log("\n--- 将写入的 config.toml (dry-run) ---\n");
     log(result.preview);
-    return { command: "switch", dryRun: true, provider: providerSummary(provider, { includeSecrets: opts.secrets }), preview: result.preview };
+    return { command: "switch", dryRun: true, provider: providerSummary(provider, { includeSecrets: opts.secrets }), preview: result.preview, preserved };
   }
 
   for (const w of result.warnings) log(`  ⚠️  ${w}`);
@@ -425,6 +437,7 @@ async function cmdSwitch(query, opts) {
   }
 
   const remote = await maybeSyncRemotes(opts);
+  const projectState = repairProjectState({ log: opts.log });
 
   return {
     command: "switch",
@@ -436,6 +449,8 @@ async function cmdSwitch(query, opts) {
     warnings: result.warnings,
     reload,
     remote,
+    preserved,
+    projectState,
   };
 }
 
@@ -448,14 +463,56 @@ async function cmdReload(opts) {
   const { log } = opts;
   const current = getCurrentProvider();
   log(`\n当前供应商: ${fmtCurrent(current)}`);
+  const preserved = preserveProjectState({ log });
   const remote = await maybeSyncRemotes(opts);
   const reload = await doReload(opts);
+  const projectState = repairProjectState({ log: opts.log });
   return {
     command: "reload",
     current: current ? { id: current.id, name: current.name } : null,
     reload,
     remote,
+    preserved,
+    projectState,
   };
+}
+
+async function cmdProjectState(opts) {
+  const report = projectStateReport();
+  if (!opts.json) {
+    if (!report.ok) {
+      opts.log(`\n❌ ${report.error}`);
+      return report;
+    }
+    const { active, snapshots, needsRepair, codexRunning } = report;
+    opts.log(`\nCodex 全局状态: ${report.stateFile}`);
+    opts.log(`  活动状态: ${active.projects} 个项目 / ${active.assignments} 条会话归属`);
+    opts.log(`  账号隔离层: ${report.accountScoped ? "存在" : "不存在（项目对所有账号可见）"}`);
+    if (snapshots.length) {
+      for (const s of snapshots) {
+        opts.log(`  寄存快照 ${s.id.slice(0, 8)}: ${s.projects} 个项目 / ${s.assignments} 条归属`);
+      }
+    }
+    opts.log(`  Codex 运行中: ${codexRunning ? "是" : "否"}`);
+    opts.log(
+      needsRepair
+        ? `\n⚠️  检测到项目被寄存（${report.reason}）。退出 Codex 后运行: ai-toolbox repair-projects`
+        : `\n✅ 项目状态正常（${report.reason}）`,
+    );
+  }
+  return report;
+}
+
+function cmdRepairProjects(opts) {
+  const { log } = opts;
+  const result = repairProjectState({ dryRun: opts.dryRun, force: opts.force, log });
+  if (!opts.json) {
+    if (!result.ok) log(`❌ ${result.error}`);
+    else if (result.dryRun) log(`[dry-run] 将恢复 ${result.plan.source.projects} 个项目`);
+    else if (!result.repaired) log(`ℹ️  无需恢复: ${result.reason ?? result.hint ?? "状态已正常"}`);
+    if (result.hint) log(`   ${result.hint}`);
+  }
+  return { command: "repair-projects", ...result };
 }
 
 async function cmdSyncRemote(opts) {
@@ -656,6 +713,16 @@ function cmdDoctor(opts) {
   checks.push({ ok: true, label: `运行中的 app-server: ${appServers.length} 个` });
   if (tuis.length) checks.push({ ok: true, label: `终端 codex 会话: ${tuis.length} 个（切换后需自行重启）` });
 
+  const projectState = projectStateReport();
+  if (projectState.ok) {
+    checks.push({
+      ok: !projectState.needsRepair,
+      label: projectState.needsRepair
+        ? `Codex 项目状态被寄存（${projectState.active.projects} 个活动 / 快照 ${projectState.snapshots[0]?.projects ?? 0} 个）→ 退出 Codex 后运行 ai-toolbox repair-projects`
+        : `Codex 项目状态: ${projectState.active.projects} 个项目 / ${projectState.active.assignments} 条归属`,
+    });
+  }
+
   for (const c of checks) log(`  ${c.ok ? "✅" : "❌"} ${c.label}`);
   const failed = checks.filter((c) => !c.ok).length;
   log(failed ? `\n有 ${failed} 项需要处理。` : "\n一切就绪。");
@@ -809,6 +876,12 @@ async function main() {
       break;
     case "reload":
       result = await cmdReload(opts);
+      break;
+    case "project-state":
+      result = await cmdProjectState(opts);
+      break;
+    case "repair-projects":
+      result = cmdRepairProjects(opts);
       break;
     case "sync-remote":
       result = await cmdSyncRemote(opts);

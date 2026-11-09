@@ -64,6 +64,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if defaults.bool(forKey: "watchEnabled") { startWatching() }
         windowController.setWatchState(watcher.isRunning)
+
+        // Codex 一退出就把被账号隔离寄存的项目状态写回去：
+        // 切换第三方供应商 / 账号后，桌面端会把 local-projects 等挪进 inactive 桶。
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == "com.openai.codex" else { return }
+            self?.repairProjectsAfterCodexQuit(attempt: 0)
+        }
+    }
+
+    private func repairProjectsAfterCodexQuit(attempt: Int) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (attempt == 0 ? 1.5 : 3.0)) { [weak self] in
+            guard let self else { return }
+            do {
+                let report = try self.backend.repairProjects()
+                if report.repaired == true, let restored = report.restored {
+                    DispatchQueue.main.async {
+                        self.windowController.setStatus(
+                            "已恢复 Codex 项目：\(restored.projects ?? 0) 个项目 / \(restored.assignments ?? 0) 条会话归属"
+                        )
+                    }
+                } else if report.reason == "codex-running", attempt < 2 {
+                    self.repairProjectsAfterCodexQuit(attempt: attempt + 1)
+                }
+            } catch {
+                // 静默失败：用户也可以手动执行「修复 Codex 项目列表」
+            }
+        }
+    }
+
+    @objc private func repairProjectsNow() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let report = try self.backend.repairProjects()
+                DispatchQueue.main.async {
+                    if report.repaired == true, let restored = report.restored {
+                        self.windowController.setStatus(
+                            "已恢复 \(restored.projects ?? 0) 个项目 / \(restored.assignments ?? 0) 条会话归属，重新打开 Codex 生效"
+                        )
+                    } else if let hint = report.hint {
+                        self.windowController.setStatus(hint)
+                    } else {
+                        self.windowController.setStatus("Codex 项目状态正常（\(report.reason ?? "ok")）")
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.windowController.setStatus("恢复失败：\(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -160,6 +214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let reload = NSMenuItem(title: "重新加载", action: #selector(reloadNow), keyEquivalent: "r")
         reload.target = self
         menu.addItem(reload)
+        let repair = NSMenuItem(title: "修复项目列表（退出 Codex 后）", action: #selector(repairProjectsNow), keyEquivalent: "")
+        repair.target = self
+        menu.addItem(repair)
         let watch = NSMenuItem(title: "自动跟随", action: #selector(toggleWatchFromMenu), keyEquivalent: "")
         watch.target = self
         watch.state = watcher.isRunning ? .on : .off

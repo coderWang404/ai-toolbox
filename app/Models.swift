@@ -89,6 +89,8 @@ struct ReloadResult: Codable {
     let current: ProviderRef?
     let reload: ReloadDetail?
     let remote: RemoteSyncInfo?
+    let preserved: ProjectStats?
+    let projectState: ProjectStateReport?
 }
 
 struct ReloadDetail: Codable {
@@ -119,7 +121,34 @@ struct SwitchResult: Codable {
     let warnings: [String]?
     let reload: ReloadDetail?
     let remote: RemoteSyncInfo?
+    let preserved: ProjectStats?
+    let projectState: ProjectStateReport?
     let error: String?
+}
+
+struct ProjectStats: Codable {
+    let projects: Int?
+    let assignments: Int?
+}
+
+struct ProjectSnapshot: Codable {
+    let id: String
+    let owner: String?
+    let projects: Int?
+    let assignments: Int?
+}
+
+struct ProjectStateReport: Codable {
+    let ok: Bool
+    let error: String?
+    let repaired: Bool?
+    let reason: String?
+    let hint: String?
+    let codexRunning: Bool?
+    let accountScoped: Bool?
+    let active: ProjectStats?
+    let restored: ProjectStats?
+    let snapshots: [ProjectSnapshot]?
 }
 
 struct CheckItem: Codable {
