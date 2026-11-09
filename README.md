@@ -177,6 +177,11 @@ cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面�
    （推理档位、上下文窗口），避免把 `gpt-6.x` 降级成只有 none/high、128k；
 4. 拉取失败只告警，不影响切换（继续用 Codex 内置列表）。
 
+在 cc-switch 界面切换时（本工具只负责热重启），`reload` 也会检查当前目录：
+如果 `model_catalog_json` 指向 cc-switch 的旧快照（`desktop-model-catalog.json`）、
+或者目录里没有 config 的模型 / 配置的推理档位，就重新拉取并改回本工具生成的目录。
+这样 cc-switch 卡片里钉死的旧目录不会再盖住新模型。
+
 `--no-model-probe` 可以跳过这一步；`--dry-run` 不会发网络请求。
 
 另外，切换过程会按阶段输出进度（读配置 → 备份项目状态 → 写配置并校验 → 重启 → 远程 → 项目状态），

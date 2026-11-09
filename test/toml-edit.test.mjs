@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { injectBearerToken, parseSectionHeader, setCatalogJsonField, tomlString } from "../src/toml-edit.mjs";
+import { injectBearerToken, parseSectionHeader, setCatalogJsonField, tomlString, catalogJsonValue } from "../src/toml-edit.mjs";
 
 test("tomlString escapes quotes, backslashes and newlines", () => {
   assert.equal(tomlString('a"b\\c\nd'), '"a\\"b\\\\c\\nd"');
@@ -56,4 +56,19 @@ test("catalog field handles null and external values", () => {
   const external = `model_provider = "x"\nmodel_catalog_json = "/tmp/my-catalog.json"\n`;
   assert.equal(setCatalogJsonField(external, true), external);
   assert.equal(setCatalogJsonField(external, false), external);
+});
+
+test("force rewrites a catalog pointer that cc-switch pinned to its own file", () => {
+  const pinned = `model_provider = "x"\nmodel_catalog_json = "/Users/me/.codex/desktop-model-catalog.json"\n`;
+  assert.equal(catalogJsonValue(pinned), "/Users/me/.codex/desktop-model-catalog.json");
+  const forced = setCatalogJsonField(pinned, true, { force: true });
+  assert.match(forced, /model_catalog_json = "cc-switch-model-catalog\.json"/);
+  assert.equal(forced.includes("desktop-model-catalog"), false);
+  // 不加 force 时保持外部文件不动（用户自管目录仍受保护）
+  assert.equal(setCatalogJsonField(pinned, true), pinned);
+});
+
+test("catalogJsonValue distinguishes missing and literal null", () => {
+  assert.equal(catalogJsonValue(`model_provider = "x"\n`), null);
+  assert.equal(catalogJsonValue(`model_provider = "x"\nmodel_catalog_json = null\n`), null);
 });

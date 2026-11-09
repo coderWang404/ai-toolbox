@@ -7,7 +7,7 @@ import {
   ccSwitchCatalogPath,
   CHATGPT_CODEX_BIN,
 } from "./paths.mjs";
-import { injectBearerToken, setCatalogJsonField } from "./toml-edit.mjs";
+import { injectBearerToken, setCatalogJsonField, catalogJsonValue } from "./toml-edit.mjs";
 import { mergeCommonConfig, isCommonConfigSubset, extractSections, stripSections } from "./common-config.mjs";
 import { buildCatalog } from "./catalog.mjs";
 import { fetchProviderModels, buildCatalogFromModelIds, loadReferenceModels } from "./model-catalog.mjs";
@@ -127,6 +127,110 @@ function providerBaseUrl(text) {
   return text.match(/^\s*base_url\s*=\s*"((?:[^"\\]|\\.)*)"/m)?.[1] ?? null;
 }
 
+/** model_catalog_json 指向的文件是否落在 CODEX_HOME 里（cc-switch 的旧目录也算"可管理"）。 */
+export function catalogPathIsManaged(value, home = codexHome()) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  const root = path.resolve(home);
+  const resolved = path.isAbsolute(value) ? path.resolve(value) : path.resolve(root, value);
+  return resolved === root || resolved.startsWith(`${root}${path.sep}`);
+}
+
+/** 当前目录是否能覆盖 config 里的 model / 推理档位。 */
+export function catalogHealth(catalog, { model = null, requiredEffort = null } = {}) {
+  const models = catalog?.models;
+  if (!Array.isArray(models) || models.length === 0) {
+    return { ok: false, reason: "missing", models: 0 };
+  }
+  if (!model) return { ok: true, reason: "healthy", models: models.length };
+  const entry = models.find((item) => item?.slug === model);
+  if (!entry) return { ok: false, reason: "model-missing", models: models.length };
+  const levels = (entry.supported_reasoning_levels ?? []).map((level) => level.effort);
+  if (requiredEffort && !levels.includes(requiredEffort)) {
+    return { ok: false, reason: "effort-missing", models: models.length, levels };
+  }
+  return { ok: true, reason: "healthy", models: models.length, levels };
+}
+
+/**
+ * 确保当前 config 生效的模型目录覆盖了 config 里的模型与推理档位。
+ * 处理 cc-switch 直接改 config.toml 的场景：卡片里可能钉死一个旧的
+ * desktop-model-catalog.json（缺少新模型），这时重新拉取并改回我们的目录。
+ */
+export async function ensureProviderCatalog({ log = console.log, dryRun = false, probe = true } = {}) {
+  const configPath = codexConfigPath();
+  if (!existsSync(configPath)) return { ok: false, error: "找不到 config.toml" };
+  let text = readFileSync(configPath, "utf8");
+  const model = topLevelString(text, "model");
+  const requiredEffort = topLevelString(text, "model_reasoning_effort");
+  const currentValue = catalogJsonValue(text);
+  const catalogPath =
+    typeof currentValue === "string" && currentValue
+      ? path.isAbsolute(currentValue)
+        ? currentValue
+        : path.join(codexHome(), currentValue)
+      : null;
+
+  let catalog = null;
+  if (catalogPath && existsSync(catalogPath)) {
+    try {
+      catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+    } catch {
+      catalog = null;
+    }
+  }
+  const health = catalogHealth(catalog, { model, requiredEffort });
+  // cc-switch 会把自己的 desktop-model-catalog.json 钉在 config 里，那份是旧快照
+  // （新模型比如 gpt-6.1-terra 根本不在里面），一律按过期处理、改成我们生成的目录。
+  const frozenCcSwitchCatalog = path.basename(catalogPath ?? "") === "desktop-model-catalog.json";
+  if (health.ok && !frozenCcSwitchCatalog) {
+    return { ok: true, refreshed: false, ...health, catalogPath };
+  }
+  const reason = health.ok ? "stale-cc-switch-catalog" : health.reason;
+
+  const baseUrl = providerBaseUrl(text);
+  const token = text.match(/experimental_bearer_token\s*=\s*"([^"]+)"/)?.[1] ?? null;
+  if (!probe || !baseUrl || !token) {
+    return { ok: false, skipped: "no-provider", reason, catalogPath };
+  }
+
+  const probeResult = await fetchProviderModels({ baseUrl, token, timeoutMs: 6000 });
+  if (!probeResult.ok) {
+    return { ok: false, error: probeResult.error, reason, catalogPath };
+  }
+  const built = buildCatalogFromModelIds(probeResult.models, {
+    configText: text,
+    preferred: model,
+    reference: loadReferenceModels(),
+    requiredEffort,
+  });
+  if (!built) return { ok: false, error: "生成模型目录失败", reason };
+  if (dryRun) return { ok: true, dryRun: true, wouldRefresh: true, models: built.models.length, reason };
+
+  writeAtomic(ccSwitchCatalogPath(), `${JSON.stringify(built, null, 2)}\n`);
+  const managed = catalogPathIsManaged(currentValue);
+  text = setCatalogJsonField(text, true, { force: managed });
+  if (catalogJsonValue(text) === "cc-switch-model-catalog.json") {
+    const backup = `${configPath}.bak_${timestamp()}`;
+    try {
+      copyFileSync(configPath, backup);
+      chmodSync(backup, 0o600);
+    } catch {
+      /* 忽略 */
+    }
+    writeAtomic(configPath, text);
+  } else {
+    log(`  ⚠️  model_catalog_json 指向 CODEX_HOME 之外（${currentValue}），未自动改写；新目录已写入 ${ccSwitchCatalogPath()}`);
+  }
+  const why =
+    reason === "missing"
+      ? "原目录缺失"
+      : reason === "stale-cc-switch-catalog"
+        ? "原目录是 cc-switch 的旧快照"
+        : "原目录不含当前模型/推理档位";
+  log(`  模型目录已刷新: ${built.models.length} 个模型（${why}）`);
+  return { ok: true, refreshed: true, models: built.models.length, reason, catalogPath: catalogJsonValue(text) };
+}
+
 function providerToken(provider) {
   const fromAuth = typeof provider.auth?.OPENAI_API_KEY === "string" ? provider.auth.OPENAI_API_KEY.trim() : "";
   if (fromAuth) return fromAuth;
@@ -185,7 +289,9 @@ export async function switchProvider({
         });
         if (built) {
           writeAtomic(ccSwitchCatalogPath(), `${JSON.stringify(built, null, 2)}\n`);
-          text = setCatalogJsonField(text, true);
+          // 供应商卡片可能钉死一个旧的绝对路径目录（如 desktop-model-catalog.json），
+          // 只要它落在 CODEX_HOME 里就改回我们生成的目录，否则新模型仍然拿不到。
+          text = setCatalogJsonField(text, true, { force: catalogPathIsManaged(catalogJsonValue(text)) });
           catalogSource = "provider";
           modelCount = built.models.length;
         }

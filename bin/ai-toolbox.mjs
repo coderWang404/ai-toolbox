@@ -10,7 +10,7 @@ import {
   syncCurrentProvider,
   getCodexCommonConfig,
 } from "../src/ccswitch-db.mjs";
-import { switchProvider, isOfficialProvider } from "../src/switcher.mjs";
+import { switchProvider, isOfficialProvider, ensureProviderCatalog } from "../src/switcher.mjs";
 import { reloadAppServers, discoverCodexProcesses, waitForRespawn, selectTargets } from "../src/reloader.mjs";
 import { watchConfig } from "../src/watcher.mjs";
 import { loadRemotes, syncRemotes, inspectRemotes } from "../src/remote-sync.mjs";
@@ -520,6 +520,14 @@ async function cmdReload(opts) {
     lastStamp = now;
   };
   stamp("preserve");
+  phase("检查模型目录");
+  let catalogState = null;
+  try {
+    catalogState = await ensureProviderCatalog({ log });
+  } catch (err) {
+    catalogState = { ok: false, error: err.message };
+  }
+  stamp("catalog");
   phase("同步远程机器");
   const remote = await maybeSyncRemotes(opts);
   stamp("remote");
@@ -536,6 +544,7 @@ async function cmdReload(opts) {
     remote,
     preserved,
     projectState,
+    catalogState,
     timings: { ...timings, total: Date.now() - startedAt },
   };
 }

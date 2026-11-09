@@ -6,6 +6,7 @@ import { codexConfigPath } from "./paths.mjs";
 import { reloadAppServers, discoverCodexProcesses, selectTargets } from "./reloader.mjs";
 import { syncRemotes } from "./remote-sync.mjs";
 import { preserveProjectState, repairProjectState } from "./codex-project-state.mjs";
+import { ensureProviderCatalog } from "./switcher.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -74,6 +75,13 @@ export async function watchConfig({
 
     // 切换供应商会连带换掉登录态，桌面端可能把项目列表寄存；先快照再重启。
     const preserved = preserveProjectState({ log });
+    // cc-switch 可能把 model_catalog_json 指回自己的旧目录，先确保目录能覆盖当前模型。
+    let catalogState = null;
+    try {
+      catalogState = await ensureProviderCatalog({ log });
+    } catch (err) {
+      log(`   ⚠️  模型目录检查失败: ${err.message}`);
+    }
     const result = await reloadAppServers({ scope, drainTimeoutMs, hard, log });
     // 先让本机热重启生效，再做 SSH 同步：远程不可达时不应该拖住本机。
     if (syncRemote) {
@@ -86,6 +94,7 @@ export async function watchConfig({
     const projectState = repairProjectState({ log });
     result.preserved = preserved;
     result.projectState = projectState;
+    result.catalogState = catalogState;
     const killed = result.outcomes.filter((o) => o.outcome === "killed").length;
     if (result.outcomes.length) {
       log(

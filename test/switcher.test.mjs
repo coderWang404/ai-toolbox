@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildProviderConfig } from "../src/switcher.mjs";
+import { buildProviderConfig, catalogHealth, catalogPathIsManaged } from "../src/switcher.mjs";
 
 test("live app sections replace stale provider snapshots", () => {
   const provider = {
@@ -40,4 +40,28 @@ trust_level = "trusted"
   assert.equal(text.includes("stale = true"), false);
   assert.match(text, /\[projects\."\/tmp\/x"\]/);
   assert.match(text, /experimental_bearer_token = "sk-test-123456789"/);
+});
+
+test("catalogPathIsManaged only claims files inside CODEX_HOME", () => {
+  const home = "/Users/me/.codex";
+  assert.equal(catalogPathIsManaged("cc-switch-model-catalog.json", home), true);
+  assert.equal(catalogPathIsManaged(`${home}/desktop-model-catalog.json`, home), true);
+  assert.equal(catalogPathIsManaged("/tmp/other-catalog.json", home), false);
+  assert.equal(catalogPathIsManaged(null, home), false);
+});
+
+test("catalogHealth detects a missing model or unsupported effort", () => {
+  assert.equal(catalogHealth(null).reason, "missing");
+  const catalog = {
+    models: [
+      {
+        slug: "gpt-6.1-terra",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+      },
+    ],
+  };
+  assert.equal(catalogHealth(catalog, { model: "gpt-6.1-terra" }).ok, true);
+  assert.equal(catalogHealth(catalog, { model: "gpt-6.1-terra", requiredEffort: "xhigh" }).reason, "effort-missing");
+  assert.equal(catalogHealth(catalog, { model: "gpt-6.1-terra", requiredEffort: "high" }).ok, true);
+  assert.equal(catalogHealth(catalog, { model: "gpt-6.1-sol" }).reason, "model-missing");
 });

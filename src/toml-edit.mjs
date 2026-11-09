@@ -280,12 +280,21 @@ function catalogValue(lines, idx) {
   return undefined; // 其它表达式/外部变量：不要碰
 }
 
+/** 读取顶层 model_catalog_json 的原始值（缺失返回 null，非字面量返回 undefined）。 */
+export function catalogJsonValue(text) {
+  const lines = text.split(/\r?\n/);
+  const idx = topLevelKeyLine(lines, "model_catalog_json");
+  if (idx === -1) return null;
+  return catalogValue(lines, idx);
+}
+
 /**
  * 管理顶层 model_catalog_json 字段：
- * - on=true  且字段缺失或为 null → 注入；已存在且指向外部文件则不动
+ * - on=true  且字段缺失或为 null → 注入；`force` 为 true 时覆盖已有值
+ *   （用于把 cc-switch 钉死的旧目录改回我们生成的 catalog）
  * - on=false 且字段指向 cc-switch 文件或为 null → 移除
  */
-export function setCatalogJsonField(text, on) {
+export function setCatalogJsonField(text, on, { force = false } = {}) {
   const lines = text.split(/\r?\n/);
   const idx = topLevelKeyLine(lines, "model_catalog_json");
   const currentValue = idx === -1 ? undefined : catalogValue(lines, idx);
@@ -293,7 +302,7 @@ export function setCatalogJsonField(text, on) {
 
   if (on) {
     if (idx !== -1) {
-      const owned = currentValue === CC_SWITCH_CATALOG_FILENAME || currentValue === null;
+      const owned = force || currentValue === CC_SWITCH_CATALOG_FILENAME || currentValue === null;
       if (owned) {
         lines[idx] = assignment;
         return lines.join("\n");
