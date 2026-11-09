@@ -187,6 +187,20 @@ cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面�
 另外，切换过程会按阶段输出进度（读配置 → 备份项目状态 → 写配置并校验 → 重启 → 远程 → 项目状态），
 桌面 App 会实时显示当前阶段和已用时间；超过 `--timeout` 会直接报出卡在哪个阶段，不会再无限转圈。
 
+## 切换不再丢项目（登录态保护）
+
+Codex 桌面端把项目列表 / 会话归属按 ChatGPT 账号隔离。cc-switch 默认
+`preserveCodexOfficialAuthOnSwitch = false`，切到第三方供应商时会把
+`~/.codex/auth.json` 收进 `~/.cc-switch/codex-login-stash.json`；Codex 因此变成
+「未登录」，账号隔离层就把项目整体寄存起来。
+
+本工具做了两层保护：
+
+1. `switch` / `reload` / `watch` 检测到 `auth.json` 缺失、而 cc-switch 暂存里
+   有可用登录态时，自动还原（官方供应商不还原）；
+2. 建议同时在 cc-switch 里打开「切换时保留官方登录态」
+   （`preserveCodexOfficialAuthOnSwitch = true`），从源头上不让登录态被收走。
+
 ## 自动跟随不会连环重启
 
 Codex 应用每次启动 app-server 都会重写 `config.toml` 里的

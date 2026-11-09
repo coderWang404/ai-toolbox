@@ -53,6 +53,7 @@ import {
   repairProjectState,
   projectStateReport,
 } from "../src/codex-project-state.mjs";
+import { ensureAuthPreserved } from "../src/codex-auth.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -446,6 +447,9 @@ async function cmdSwitch(query, opts) {
 
   for (const w of result.warnings) log(`  ⚠️  ${w}`);
 
+  phase("检查 ChatGPT 登录态");
+  const authState = ensureAuthPreserved({ log });
+
   phase("同步 cc-switch 状态");
   let synced = false;
   if (!process.env.CODEX_HOME?.trim()) {
@@ -492,6 +496,7 @@ async function cmdSwitch(query, opts) {
     remote,
     preserved,
     projectState,
+    authState,
     timings: { ...timings, total: Date.now() - startedAt },
   };
 }
@@ -513,6 +518,8 @@ async function cmdReload(opts) {
   };
   phase("备份 Codex 项目状态");
   const preserved = preserveProjectState({ log });
+  phase("检查 ChatGPT 登录态");
+  const authState = ensureAuthPreserved({ log });
   let lastStamp = Date.now();
   const stamp = (key) => {
     const now = Date.now();
@@ -545,6 +552,7 @@ async function cmdReload(opts) {
     preserved,
     projectState,
     catalogState,
+    authState,
     timings: { ...timings, total: Date.now() - startedAt },
   };
 }

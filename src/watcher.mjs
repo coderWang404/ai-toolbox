@@ -8,6 +8,7 @@ import { reloadAppServers, discoverCodexProcesses, selectTargets } from "./reloa
 import { syncRemotes } from "./remote-sync.mjs";
 import { preserveProjectState, repairProjectState } from "./codex-project-state.mjs";
 import { ensureProviderCatalog } from "./switcher.mjs";
+import { ensureAuthPreserved } from "./codex-auth.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -92,6 +93,8 @@ export async function watchConfig({
 
     // 切换供应商会连带换掉登录态，桌面端可能把项目列表寄存；先快照再重启。
     const preserved = preserveProjectState({ log });
+    // cc-switch 切第三方时可能收走 auth.json，登录态一变项目就会被寄存，先还原。
+    const authState = ensureAuthPreserved({ log });
     // cc-switch 可能把 model_catalog_json 指回自己的旧目录，先确保目录能覆盖当前模型。
     let catalogState = null;
     try {
@@ -112,6 +115,7 @@ export async function watchConfig({
     result.preserved = preserved;
     result.projectState = projectState;
     result.catalogState = catalogState;
+    result.authState = authState;
     // 重启会触发应用改写 config.toml（mcp_servers/tui 等），指纹此时可能已变；
     // 重新取一次基线，避免把自己造成的写入当成新的供应商切换。
     last = configFingerprint() ?? last;
