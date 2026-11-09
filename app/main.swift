@@ -74,6 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   app.bundleIdentifier == "com.openai.codex" else { return }
             self?.repairProjectsAfterCodexQuit(attempt: 0)
         }
+
+        // 启动时也检查一次：上次 Codex 退出时本 App 可能没在运行。
+        repairProjectsAfterCodexQuit(attempt: 0)
     }
 
     private func repairProjectsAfterCodexQuit(attempt: Int) {
