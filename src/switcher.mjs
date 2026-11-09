@@ -10,7 +10,7 @@ import {
 import { injectBearerToken, setCatalogJsonField } from "./toml-edit.mjs";
 import { mergeCommonConfig, isCommonConfigSubset, extractSections, stripSections } from "./common-config.mjs";
 import { buildCatalog } from "./catalog.mjs";
-import { fetchProviderModels, buildCatalogFromModelIds } from "./model-catalog.mjs";
+import { fetchProviderModels, buildCatalogFromModelIds, loadReferenceModels } from "./model-catalog.mjs";
 import { findCodexBinary, readEffectiveConfig } from "./verify-client.mjs";
 
 const OFFICIAL_IDS = new Set(["codex-official"]);
@@ -180,6 +180,8 @@ export async function switchProvider({
           configText: text,
           apiFormat,
           preferred: topLevelString(text, "model"),
+          reference: loadReferenceModels(),
+          requiredEffort: topLevelString(text, "model_reasoning_effort"),
         });
         if (built) {
           writeAtomic(ccSwitchCatalogPath(), `${JSON.stringify(built, null, 2)}\n`);

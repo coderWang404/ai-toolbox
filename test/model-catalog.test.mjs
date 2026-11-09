@@ -7,7 +7,11 @@ import {
   selectCatalogModels,
   fetchProviderModels,
   buildCatalogFromModelIds,
+  loadReferenceModels,
 } from "../src/model-catalog.mjs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 function serve(handler) {
   return new Promise((resolve) => {
@@ -118,4 +122,61 @@ test("buildCatalogFromModelIds produces Codex catalog entries", () => {
   assert.equal(catalog.models[0].slug, "gpt-6.1-sol");
   assert.equal(catalog.models.some((m) => m.slug === "tts-1"), false);
   assert.equal(typeof catalog.models[0].context_window, "number");
+});
+
+test("gpt-family models keep full reasoning levels instead of the template's none/high", () => {
+  const configText = `model = "gpt-6.1-terra"\nmodel_reasoning_effort = "xhigh"\n\n[model_providers.custom]\nbase_url = "https://example.com/v1"\nwire_api = "responses"\n`;
+  const catalog = buildCatalogFromModelIds(["gpt-6.1-terra"], {
+    configText,
+    apiFormat: null,
+    preferred: "gpt-6.1-terra",
+    requiredEffort: "xhigh",
+  });
+  const entry = catalog.models[0];
+  const levels = entry.supported_reasoning_levels.map((level) => level.effort);
+  assert.ok(levels.includes("xhigh"), `levels=${levels}`);
+  assert.ok(levels.includes("ultra"), `levels=${levels}`);
+  assert.ok(levels.includes(entry.default_reasoning_level));
+});
+
+test("reference manifest supplies real capabilities (levels + context)", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "ai-toolbox-models-"));
+  writeFileSync(
+    path.join(home, "models_cache.json"),
+    JSON.stringify({
+      models: [
+        {
+          slug: "gpt-6.1-terra",
+          context_window: 500000,
+          max_context_window: 500000,
+          default_reasoning_level: "low",
+          supported_reasoning_levels: [
+            { effort: "low", description: "low" },
+            { effort: "medium", description: "medium" },
+            { effort: "high", description: "high" },
+            { effort: "xhigh", description: "xhigh" },
+            { effort: "max", description: "max" },
+            { effort: "ultra", description: "ultra" },
+          ],
+        },
+      ],
+    }),
+  );
+  const reference = loadReferenceModels(home);
+  assert.equal(reference.size, 1);
+
+  const configText = `model = "gpt-6.1-terra"\n\n[model_providers.custom]\nbase_url = "https://example.com/v1"\nwire_api = "responses"\n`;
+  const catalog = buildCatalogFromModelIds(["gpt-6.1-terra"], {
+    configText,
+    apiFormat: null,
+    preferred: "gpt-6.1-terra",
+    reference,
+  });
+  const entry = catalog.models[0];
+  assert.equal(entry.context_window, 500000);
+  assert.equal(entry.default_reasoning_level, "low");
+  assert.deepEqual(
+    entry.supported_reasoning_levels.map((level) => level.effort),
+    ["low", "medium", "high", "xhigh", "max", "ultra"],
+  );
 });

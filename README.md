@@ -170,10 +170,12 @@ cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面�
 切换时本工具会：
 
 1. 优先用 cc-switch 里配置的模型目录；
-2. 没有配置时，直接请求供应商的 OpenAI 兼容 `GET {base_url}/models`（8 秒超时），
+2. 没有配置时，直接请求供应商的 OpenAI 兼容 `GET {base_url}/models`（6 秒超时），
    过滤掉音频 / 向量 / 图像等非对话模型，把真实模型写成
    `~/.codex/cc-switch-model-catalog.json` 并在 config.toml 里挂上 `model_catalog_json`；
-3. 拉取失败只告警，不影响切换（继续用 Codex 内置列表）。
+3. 生成目录时按 slug 从 Codex 自己的模型清单（`models_cache.json`）继承真实能力
+   （推理档位、上下文窗口），避免把 `gpt-6.x` 降级成只有 none/high、128k；
+4. 拉取失败只告警，不影响切换（继续用 Codex 内置列表）。
 
 `--no-model-probe` 可以跳过这一步；`--dry-run` 不会发网络请求。
 
