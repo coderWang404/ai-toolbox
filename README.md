@@ -187,6 +187,19 @@ cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面�
 另外，切换过程会按阶段输出进度（读配置 → 备份项目状态 → 写配置并校验 → 重启 → 远程 → 项目状态），
 桌面 App 会实时显示当前阶段和已用时间；超过 `--timeout` 会直接报出卡在哪个阶段，不会再无限转圈。
 
+## 自动跟随不会连环重启
+
+Codex 应用每次启动 app-server 都会重写 `config.toml` 里的
+`[mcp_servers.node_repl.env]`（`BROWSER_USE_AVAILABLE_BACKENDS` 等能力开关会在
+`chrome` 和 `chrome,iab,mcpapps` 之间切换）。如果监听器直接 hash 整个文件，
+每次重写都会被当成「换供应商」，于是热重启 → 应用改写 → 又热重启。
+
+本工具只对**供应商指纹**做比对：顶层 `model` / `model_provider` /
+`model_reasoning_effort` / `model_catalog_json` 等键，加整张
+`[model_providers.*]`；`desktop`、`marketplaces`、`plugins`、`projects`、
+`mcp_servers`、`tui` 的改动一律忽略。另外两次热重启之间至少间隔 4 秒，
+自身写入后会重新取基线。
+
 ## 与 cc-switch 的协作方式（重要）
 
 **推荐工作流：在 cc-switch 里切换供应商 + 本 App 开「自动跟随」。** 两边状态永远一致，不会出问题。

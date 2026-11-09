@@ -441,6 +441,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return }
                 self.menuStatus = "⚡ 已自动跟随切换"
                 self.windowController.refresh()
+                // 重启会让应用重写 config.toml；重新取一次供应商指纹，避免自我触发。
+                self.watcher.baselineNow()
             }
         }
         watcher.start()

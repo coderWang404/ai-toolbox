@@ -1113,6 +1113,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     }
                     if let remote = self.remoteSummary(result.remote) { text += " · \(remote)" }
                     self.setStatus(text)
+                    NotificationCenter.default.post(name: .configWrittenFromApp, object: nil)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -1153,6 +1154,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     }
                     if let remote = self.remoteSummary(result.remote) { text += " · \(remote)" }
                     self.setStatus(text)
+                    NotificationCenter.default.post(name: .configWrittenFromApp, object: nil)
                     self.finishAutoReload(onDone: onDone)
                 }
             } catch {

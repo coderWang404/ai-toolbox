@@ -3,6 +3,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { codexConfigPath } from "./paths.mjs";
+import { providerFingerprint, providerSummaryFromText } from "./config-fingerprint.mjs";
 import { reloadAppServers, discoverCodexProcesses, selectTargets } from "./reloader.mjs";
 import { syncRemotes } from "./remote-sync.mjs";
 import { preserveProjectState, repairProjectState } from "./codex-project-state.mjs";
@@ -10,11 +11,17 @@ import { ensureProviderCatalog } from "./switcher.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function configHash() {
+/**
+ * 只对「供应商相关」的那部分配置做 hash。
+ * 应用每次启动都会重写 mcp_servers / tui / plugins，整文件 hash 会导致
+ * 「重启 → 应用改写 config → 又重启」的死循环。
+ */
+function configFingerprint() {
   const p = codexConfigPath();
   if (!existsSync(p)) return null;
   try {
-    return createHash("sha256").update(readFileSync(p)).digest("hex");
+    const slice = providerFingerprint(readFileSync(p, "utf8"));
+    return createHash("sha256").update(slice ?? "").digest("hex");
   } catch {
     return null;
   }
@@ -35,7 +42,9 @@ export async function watchConfig({
   log = console.log,
   onReload = null,
 } = {}) {
-  let last = configHash();
+  let last = configFingerprint();
+  let lastReloadAt = 0;
+  const cooldownMs = 4000;
   if (last === null) {
     throw new Error(`找不到配置文件: ${codexConfigPath()}`);
   }
@@ -46,22 +55,30 @@ export async function watchConfig({
 
   for (;;) {
     await sleep(intervalMs);
-    const current = configHash();
+    const current = configFingerprint();
     if (current === null || current === last) continue;
 
     // 防抖：等写入稳定（原子写仍可能连续触发）
     let stable = current;
     for (let i = 0; i < 5; i++) {
       await sleep(150);
-      const again = configHash();
+      const again = configFingerprint();
       if (again === null || again === stable) break;
       stable = again;
     }
     last = stable;
+    // 距上次热重启太近的变化先合并，避免应用/目录写入引发连环重启。
+    if (Date.now() - lastReloadAt < cooldownMs) continue;
+    lastReloadAt = Date.now();
 
     const { appServers, tuis } = discoverCodexProcesses();
     const targets = selectTargets(appServers, scope);
-    log(`🔁 检测到配置变化 ${new Date().toLocaleTimeString()} — ${dryRun ? "[dry-run] 将重启" : "重启"} ${targets.length} 个 app-server`);
+    const summary = providerSummaryFromText(readFileSync(codexConfigPath(), "utf8"));
+    log(
+      `🔁 检测到供应商变化 ${new Date().toLocaleTimeString()}（${summary.providerId ?? "?"} · ${summary.baseUrl ?? "-"} · ${summary.model ?? "-"}）— ${
+        dryRun ? "[dry-run] 将重启" : "重启"
+      } ${targets.length} 个 app-server`,
+    );
     if (tuis.length) {
       log(`   ⚠️  检测到 ${tuis.length} 个终端 codex 会话：它们需要自行重启才能生效`);
     }
@@ -95,6 +112,9 @@ export async function watchConfig({
     result.preserved = preserved;
     result.projectState = projectState;
     result.catalogState = catalogState;
+    // 重启会触发应用改写 config.toml（mcp_servers/tui 等），指纹此时可能已变；
+    // 重新取一次基线，避免把自己造成的写入当成新的供应商切换。
+    last = configFingerprint() ?? last;
     const killed = result.outcomes.filter((o) => o.outcome === "killed").length;
     if (result.outcomes.length) {
       log(
