@@ -80,6 +80,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var iqCatalogStamp: TimeInterval = 0
     private var iqDidLoadResult = false
     private var busy = false
+    private var busyStartedAt: Date?
+    private var busyBaseStatus: String?
+    private var busyTimer: Timer?
     private var pendingAutoReload = false
     private var pendingAutoReloadDone: (() -> Void)?
     private var pendingAutoReloadScheduled = false
@@ -1021,7 +1024,15 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let result = try self.backend.switchProvider(provider.id, scope: scope, focus: focus, force: force, remote: self.syncRemoteEnabled())
+                let result = try self.backend.switchProviderProgress(
+                    provider.id,
+                    scope: scope,
+                    focus: focus,
+                    force: force,
+                    remote: self.syncRemoteEnabled()
+                ) { [weak self] line in
+                    self?.showProgress(line)
+                }
                 NotificationCenter.default.post(name: .configWrittenFromApp, object: nil)
                 DispatchQueue.main.async {
                     self.setBusy(false)
@@ -1029,6 +1040,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     self.refresh()
                     var parts = ["✔ 已切换到 \(provider.name)"]
                     if let model = result.effective?.model { parts.append("模型 \(model)") }
+                    if let count = result.modelCount, count > 0 {
+                        parts.append("模型目录 \(count) 个")
+                    }
                     if let reload = result.reload {
                         if reload.respawned != nil {
                             parts.append("app-server 已自动重启，立即生效")
@@ -1039,6 +1053,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                         } else {
                             parts.append("下次启动 Codex 时生效")
                         }
+                    }
+                    if let reverted = result.reverted, !reverted.isEmpty {
+                        let live = reverted["liveBase"] ?? reverted["liveProvider"] ?? "?"
+                        parts.append("⚠️ 配置被改回 \(live)（cc-switch 正在运行？请用 cc-switch 切换）")
                     }
                     if let warnings = result.warnings, !warnings.isEmpty {
                         parts.append("⚠️ " + warnings.joined(separator: "；"))
@@ -1051,6 +1069,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                         }
                     }
                     if let remote = self.remoteSummary(result.remote) { parts.append(remote) }
+                    if let timings = result.timings, let total = timings["total"] {
+                        parts.append(self.timingSummary(timings, total: total))
+                    }
                     self.setStatus(parts.joined(separator: " · "))
                 }
             } catch {
@@ -1888,6 +1909,21 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         refreshSidebar()
     }
 
+    private func timingSummary(_ timings: [String: Int], total: Int) -> String {
+        let order: [(String, String)] = [
+            ("writeAndVerify", "写配置"),
+            ("reload", "重启"),
+            ("remote", "远程"),
+            ("projectState", "项目状态"),
+        ]
+        let details = order.compactMap { key, label -> String? in
+            guard let ms = timings[key], ms >= 200 else { return nil }
+            return "\(label) \(String(format: "%.1f", Double(ms) / 1000))s"
+        }
+        let totalText = String(format: "%.1f", Double(total) / 1000)
+        return details.isEmpty ? "耗时 \(totalText)s" : "耗时 \(totalText)s（\(details.joined(separator: " · "))）"
+    }
+
     private func remoteSummary(_ remote: RemoteSyncInfo?) -> String? {
         guard let remote, !remote.hosts.isEmpty else { return nil }
         let parts = remote.hosts.map { host -> String in
@@ -1952,6 +1988,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     func setStatus(_ text: String) {
         statusLabel.set(text)
+        if busy { busyBaseStatus = text }
     }
 
     /// busy 可能来自切换/刷新/IQ 等任何操作；用定时器兜底，避免挂起的自动跟随永远不执行。
@@ -1994,9 +2031,52 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         reloadButton.isEnabled = !value
         iqRunButton?.isEnabled = !value
         tableView.isEnabled = !value
-        if value { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         addRemoteButton?.isEnabled = !value
+        if value {
+            spinner.startAnimation(nil)
+            if busyStartedAt == nil { busyStartedAt = Date() }
+            if let status { busyBaseStatus = status }
+            startBusyTimer()
+        } else {
+            spinner.stopAnimation(nil)
+            stopBusyTimer()
+            busyStartedAt = nil
+            busyBaseStatus = nil
+        }
         if let status { setStatus(status) }
+    }
+
+    /// 操作期间每秒刷新一次「已用 Ns」，避免界面看起来像卡死。
+    private func startBusyTimer() {
+        busyTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.renderBusyStatus()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        busyTimer = timer
+    }
+
+    private func stopBusyTimer() {
+        busyTimer?.invalidate()
+        busyTimer = nil
+    }
+
+    private func renderBusyStatus() {
+        guard busy, let started = busyStartedAt else { return }
+        let seconds = Int(Date().timeIntervalSince(started))
+        let base = (busyBaseStatus ?? "").trimmingCharacters(in: .whitespaces)
+        statusLabel.set(base.isEmpty ? "处理中… 已用 \(seconds)s" : "\(base)（已用 \(seconds)s）")
+    }
+
+    /// 后台线程收到的进度行（CLI 输出到 stderr），切回主线程显示。
+    private func showProgress(_ line: String) {
+        let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.busy else { return }
+            self.busyBaseStatus = text
+            self.renderBusyStatus()
+        }
     }
 
     private func presentAddSheet() {

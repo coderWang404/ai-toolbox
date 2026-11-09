@@ -91,6 +91,7 @@ struct ReloadResult: Codable {
     let remote: RemoteSyncInfo?
     let preserved: ProjectStats?
     let projectState: ProjectStateReport?
+    let timings: [String: Int]?
 }
 
 struct ReloadDetail: Codable {
@@ -123,6 +124,10 @@ struct SwitchResult: Codable {
     let remote: RemoteSyncInfo?
     let preserved: ProjectStats?
     let projectState: ProjectStateReport?
+    let reverted: [String: String]?
+    let catalogSource: String?
+    let modelCount: Int?
+    let timings: [String: Int]?
     let error: String?
 }
 

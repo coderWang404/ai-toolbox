@@ -25,6 +25,14 @@ enum BackendError: LocalizedError {
 final class Backend {
     static let shared = Backend()
 
+    /// 记录 watchdog 是否真的触发过（用于给出明确的「命令超时」而不是解析失败）。
+    private final class TimeoutLatch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        func fire() { lock.lock(); fired = true; lock.unlock() }
+        var isFired: Bool { lock.lock(); defer { lock.unlock() }; return fired }
+    }
+
     private(set) var nodePath: String?
     private(set) var scriptPath: String?
     private var controlledProcess: Process?
@@ -185,8 +193,10 @@ final class Backend {
         }
 
         let deadline = DispatchTime.now() + timeout
+        let timeoutLatch = TimeoutLatch()
         let watchdog = DispatchWorkItem {
             if process.isRunning {
+                timeoutLatch.fire()
                 process.terminate()
                 DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                     if process.isRunning { kill(process.processIdentifier, SIGKILL) }
@@ -211,6 +221,13 @@ final class Backend {
         }
         process.waitUntilExit()
         group.wait()
+
+        if timeoutLatch.isFired {
+            let command = arguments.dropFirst().prefix(2).joined(separator: " ")
+            throw BackendError.commandFailed(
+                "命令超时（\(Int(timeout))s）已终止：ai-toolbox \(command)。运行 ai-toolbox current 可查看当前配置状态。"
+            )
+        }
 
         if ProcessInfo.processInfo.environment["AI_TOOLBOX_DEBUG"] != nil {
             FileHandle.standardError.write("EXIT \(process.terminationStatus) out=\(outData.count)B err=\(errData.count)B\n".data(using: .utf8)!)
@@ -279,7 +296,7 @@ final class Backend {
     }
 
     func current() throws -> CurrentResult {
-        try decode(CurrentResult.self, from: run(["current"], withSecrets: true))
+        try decode(CurrentResult.self, from: run(["current"], timeout: 25, withSecrets: true))
     }
 
     func switchProvider(_ identifier: String, scope: String, focus: Bool, force: Bool = false, remote: Bool = true) throws -> SwitchResult {
@@ -288,6 +305,26 @@ final class Backend {
         if force { args.append("--force") }
         if !remote { args.append("--no-remote") }
         return try decode(SwitchResult.self, from: run(args, timeout: 180))
+    }
+
+    func switchProviderProgress(
+        _ identifier: String,
+        scope: String,
+        focus: Bool,
+        force: Bool = false,
+        remote: Bool = true,
+        onProgress: @escaping (String) -> Void
+    ) throws -> SwitchResult {
+        var args = ["switch", identifier, "--scope", scope]
+        if !focus { args.append("--no-focus") }
+        if force { args.append("--force") }
+        if !remote { args.append("--no-remote") }
+        let data = try runStreaming(args, timeout: 180) { chunk in
+            for line in chunk.split(separator: "\n") {
+                onProgress(String(line))
+            }
+        }
+        return try decode(SwitchResult.self, from: data)
     }
 
     func reload(scope: String, focus: Bool = true, remote: Bool = true) throws -> ReloadResult {
@@ -383,8 +420,10 @@ final class Backend {
         try process.run()
         track(process)
         let deadline = DispatchTime.now() + timeout
+        let timeoutLatch = TimeoutLatch()
         let watchdog = DispatchWorkItem {
             if process.isRunning {
+                timeoutLatch.fire()
                 process.terminate()
                 DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                     if process.isRunning { kill(process.processIdentifier, SIGKILL) }
@@ -418,6 +457,12 @@ final class Backend {
         errLock.unlock()
         if !tail.isEmpty {
             DispatchQueue.main.async { onStderr(tail) }
+        }
+        if timeoutLatch.isFired {
+            let command = arguments.dropFirst().prefix(2).joined(separator: " ")
+            throw BackendError.commandFailed(
+                "命令超时（\(Int(timeout))s）已终止：ai-toolbox \(command)。运行 ai-toolbox current 可查看当前配置状态。"
+            )
         }
         if process.terminationStatus != 0 {
             let message = Self.jsonError(in: outData)

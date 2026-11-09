@@ -110,6 +110,9 @@ ai-toolbox doctor                  # 环境自检
 | `--hard` | 跳过平滑退出，直接强制结束（界面会出现「Restart ChatGPT」恢复页，点一次即恢复） |
 | `--drain <秒>` | SIGTERM 平滑等待时间，默认 8 秒 |
 | `--no-reload` | 只写配置，不重启 Codex |
+| `--no-remote` | 不同步远程机器 |
+| `--no-model-probe` | 不向供应商 `/models` 拉模型目录（只用 cc-switch 里配置的目录） |
+| `--timeout <秒>` | 单次命令总超时，默认 120；超时会明确报出卡在哪个阶段 |
 | `--dry-run` | 只展示将要写入的配置 / 将要重启的进程 |
 | `--no-focus` | 热重启后不把 ChatGPT 窗口切到前台 |
 | `--json` | 输出 JSON（桌面 App 与脚本调用） |
@@ -158,6 +161,24 @@ Codex 桌面版从 0.157 起把项目列表和「会话 → 项目」归属按 C
 ai-toolbox project-state     # 先看是否被寄存（active / snapshots 数量）
 ai-toolbox repair-projects   # Codex 完全退出后执行；--dry-run 只预览
 ```
+
+## 切换后看不到新供应商的模型？已内置补齐
+
+cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面端就只能显示内置模型列表，
+切过去后模型选择器里没有（或选不到）新供应商真实可用的模型。
+
+切换时本工具会：
+
+1. 优先用 cc-switch 里配置的模型目录；
+2. 没有配置时，直接请求供应商的 OpenAI 兼容 `GET {base_url}/models`（8 秒超时），
+   过滤掉音频 / 向量 / 图像等非对话模型，把真实模型写成
+   `~/.codex/cc-switch-model-catalog.json` 并在 config.toml 里挂上 `model_catalog_json`；
+3. 拉取失败只告警，不影响切换（继续用 Codex 内置列表）。
+
+`--no-model-probe` 可以跳过这一步；`--dry-run` 不会发网络请求。
+
+另外，切换过程会按阶段输出进度（读配置 → 备份项目状态 → 写配置并校验 → 重启 → 远程 → 项目状态），
+桌面 App 会实时显示当前阶段和已用时间；超过 `--timeout` 会直接报出卡在哪个阶段，不会再无限转圈。
 
 ## 与 cc-switch 的协作方式（重要）
 

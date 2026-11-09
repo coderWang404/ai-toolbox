@@ -103,6 +103,8 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   --force               cc-switch 正在运行时，仍强制从命令行切换（有卡片错位风险）
   --no-reload           只写配置，不重启 Codex
   --no-remote           不同步远程机器（内置机器见 src/remotes.json，自定义见 ~/.ai-toolbox/remotes.json）
+  --no-model-probe      不向供应商 /models 拉取模型目录（只用 cc-switch 里配置的目录）
+  --timeout <秒>        单次命令总超时（默认 120，watch / serve 不生效）
   --dry-run             只展示将写入的配置，不落盘
   --focus / --no-focus  重启后是否把 ChatGPT 窗口切到前台（默认 focus）
   --json                以 JSON 输出（供桌面 App / 脚本调用）
@@ -125,6 +127,8 @@ function makeLogger(jsonMode) {
   return {
     log: jsonMode ? noop : console.log,
     warn: jsonMode ? noop : console.log,
+    // 进度只走 stderr：桌面 App 可以边跑边显示当前卡在哪个阶段，也不会污染 stdout 的 JSON。
+    progress: jsonMode ? (line) => process.stderr.write(`${line}\n`) : (line) => console.log(line),
   };
 }
 
@@ -375,6 +379,20 @@ async function doReload(opts) {
 
 async function cmdSwitch(query, opts) {
   const { log } = opts;
+  const startedAt = Date.now();
+  const timings = {};
+  let lastStamp = startedAt;
+  const stamp = (key) => {
+    const now = Date.now();
+    timings[key] = now - lastStamp;
+    lastStamp = now;
+  };
+  const phase = (name) => {
+    opts.setPhase?.(name);
+    opts.progress?.(`→ ${name}`);
+  };
+
+  phase("读取供应商配置");
   const provider = findProvider(query);
   if (!provider) {
     throw new Error(`找不到供应商「${query}」。可用: ai-toolbox list`);
@@ -398,25 +416,37 @@ async function cmdSwitch(query, opts) {
 
   // 切换供应商常常连带换掉 auth / ChatGPT 登录态，桌面端会把项目列表按账号寄存。
   // 先留一份本地快照，切换后再尝试恢复。
+  phase("备份 Codex 项目状态");
   const preserved = preserveProjectState({ log });
 
   const common = getCodexCommonConfig();
+  phase("写入配置并校验");
   const result = await switchProvider({
     provider,
     commonConfig: common,
     apiFormat: provider.meta?.apiFormat,
     dryRun: opts.dryRun,
+    probeModels: opts.modelProbe,
     log,
   });
+  stamp("writeAndVerify");
 
   if (opts.dryRun) {
     log("\n--- 将写入的 config.toml (dry-run) ---\n");
     log(result.preview);
-    return { command: "switch", dryRun: true, provider: providerSummary(provider, { includeSecrets: opts.secrets }), preview: result.preview, preserved };
+    return {
+      command: "switch",
+      dryRun: true,
+      provider: providerSummary(provider, { includeSecrets: opts.secrets }),
+      preview: result.preview,
+      preserved,
+      timings,
+    };
   }
 
   for (const w of result.warnings) log(`  ⚠️  ${w}`);
 
+  phase("同步 cc-switch 状态");
   let synced = false;
   if (!process.env.CODEX_HOME?.trim()) {
     synced = syncCurrentProvider(provider.id);
@@ -431,13 +461,20 @@ async function cmdSwitch(query, opts) {
 
   let reload = null;
   if (opts.reload) {
+    phase("重启 Codex app-server");
     reload = await doReload(opts);
+    stamp("reload");
   } else {
     log(`  已跳过重启（--no-reload）。新开 Codex 会话时生效。`);
   }
 
+  phase("同步远程机器");
   const remote = await maybeSyncRemotes(opts);
+  stamp("remote");
+
+  phase("恢复 Codex 项目状态");
   const projectState = repairProjectState({ log: opts.log });
+  stamp("projectState");
 
   return {
     command: "switch",
@@ -447,10 +484,15 @@ async function cmdSwitch(query, opts) {
     backupPath: result.backupPath,
     synced,
     warnings: result.warnings,
+    reverted: result.reverted ?? null,
+    catalogSource: result.catalogSource ?? "none",
+    modelCount: result.modelCount ?? 0,
+    modelProbe: result.modelProbe ? { ok: !!result.modelProbe.ok, error: result.modelProbe.error ?? null, ms: result.modelProbe.ms } : null,
     reload,
     remote,
     preserved,
     projectState,
+    timings: { ...timings, total: Date.now() - startedAt },
   };
 }
 
@@ -461,12 +503,32 @@ async function maybeSyncRemotes(opts) {
 
 async function cmdReload(opts) {
   const { log } = opts;
+  const startedAt = Date.now();
+  const timings = {};
   const current = getCurrentProvider();
   log(`\n当前供应商: ${fmtCurrent(current)}`);
+  const phase = (name) => {
+    opts.setPhase?.(name);
+    opts.progress?.(`→ ${name}`);
+  };
+  phase("备份 Codex 项目状态");
   const preserved = preserveProjectState({ log });
+  let lastStamp = Date.now();
+  const stamp = (key) => {
+    const now = Date.now();
+    timings[key] = now - lastStamp;
+    lastStamp = now;
+  };
+  stamp("preserve");
+  phase("同步远程机器");
   const remote = await maybeSyncRemotes(opts);
+  stamp("remote");
+  phase("重启 Codex app-server");
   const reload = await doReload(opts);
+  stamp("reload");
+  phase("恢复 Codex 项目状态");
   const projectState = repairProjectState({ log: opts.log });
+  stamp("projectState");
   return {
     command: "reload",
     current: current ? { id: current.id, name: current.name } : null,
@@ -474,6 +536,7 @@ async function cmdReload(opts) {
     remote,
     preserved,
     projectState,
+    timings: { ...timings, total: Date.now() - startedAt },
   };
 }
 
@@ -815,6 +878,8 @@ async function main() {
       force: { type: "boolean", default: false },
       "no-reload": { type: "boolean", default: false },
       "no-remote": { type: "boolean", default: false },
+      "no-model-probe": { type: "boolean", default: false },
+      timeout: { type: "string" },
       "dry-run": { type: "boolean", default: false },
       "with-secrets": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
@@ -832,7 +897,8 @@ async function main() {
   });
 
   const json = values.json;
-  const { log, warn } = makeLogger(json);
+  const { log, warn, progress } = makeLogger(json);
+  let currentPhase = "启动";
   const opts = {
     json,
     log: json ? log : console.log,
@@ -841,6 +907,12 @@ async function main() {
     drainMs: values.drain ? Math.max(0, Number(values.drain)) * 1000 : 8000,
     reload: !values["no-reload"],
     remote: !values["no-remote"],
+    modelProbe: !values["no-model-probe"],
+    timeoutMs: values.timeout ? Math.max(10, Number(values.timeout)) * 1000 : 120000,
+    setPhase: (name) => {
+      currentPhase = name;
+    },
+    progress,
     hard: values.hard,
     force: values.force,
     dryRun: values["dry-run"],
@@ -860,6 +932,23 @@ async function main() {
     if (json) console.log(JSON.stringify({ command: "help", text: HELP }));
     else console.log(HELP);
     return;
+  }
+
+  // 长驻命令不设总超时；其余命令超时后明确报出卡在哪个阶段，避免界面一直转圈。
+  const LONG_RUNNING = new Set(["watch", "today-serve", "grok-serve", "net-speed"]);
+  if (!LONG_RUNNING.has(command)) {
+    currentPhase = command;
+    const watchdog = setTimeout(() => {
+      const message = `命令超时（${Math.round(opts.timeoutMs / 1000)}s），卡在阶段：${currentPhase}`;
+      if (json) {
+        console.log(JSON.stringify({ ok: false, error: message, phase: currentPhase, timeout: true }));
+      } else {
+        console.error(`\n❌ ${message}`);
+        console.error(`   config.toml 已按原子写落盘；可运行 ai-toolbox current 查看当前状态，或重试。`);
+      }
+      process.exit(1);
+    }, opts.timeoutMs);
+    watchdog.unref?.();
   }
 
   let result;
