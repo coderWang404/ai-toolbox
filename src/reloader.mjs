@@ -23,23 +23,52 @@ function psSnapshot() {
   return rows;
 }
 
-function classify(row) {
+/**
+ * 判断 app-server 真正属于谁：看父进程链，而不是只看 codex 命令行。
+ * 同一个 ChatGPT.app 里的 codex 二进制可能被别的应用（DeepSeek Harness、Trae…）
+ * 或 SSH 远程会话拉起，误杀它们会让「切换后新配置不生效」。
+ */
+export function attributeOwner(row, byPid) {
+  let cur = byPid.get(row.ppid);
+  const hasParentInfo = cur != null;
+  for (let depth = 0; depth < 4 && cur; depth++) {
+    const cmd = cur.command;
+    if (/ChatGPT\.app\/Contents\/MacOS\/ChatGPT(\s|$)/.test(cmd)) return "chatgpt";
+    if (/(^|\/)ssh\s/.test(cmd)) return "remote";
+    if (cmd.includes("/.trae-cn/")) return "trae";
+    if (cmd.includes("WorkBuddy")) return "workbuddy";
+    cur = byPid.get(cur.ppid);
+  }
+  // 父进程链查得到但都不是已知宿主：说明是被其它程序拉起的，不要算成 ChatGPT。
+  if (hasParentInfo) return "other";
+  // 只有完全拿不到父进程信息时，才回退到命令行特征。
+  const cmd = row.command;
+  if (cmd.includes("/Applications/ChatGPT.app/")) return "chatgpt";
+  if (cmd.includes("/.trae-cn/")) return "trae";
+  if (cmd.includes("WorkBuddy")) return "workbuddy";
+  return "other";
+}
+
+export function classifyProcess(row, byPid) {
   const cmd = row.command;
   const tokens = cmd.split(/\s+/);
+  // ssh 客户端命令行里也会出现 `codex app-server`（远程要执行的命令），别把它当成 app-server。
+  const executable = tokens[0] ?? "";
+  if (/(^|\/)(ssh|scp|sftp)$/.test(executable)) return null;
   // 兼容两种启动方式：直接执行 codex，或 node /path/to/codex.js。
   const codexIndex = tokens.findIndex((token) => /(^|\/)codex(\.js)?$/.test(token));
   if (codexIndex === -1) return null;
 
   const args = tokens.slice(codexIndex + 1);
   const isAppServer = args.includes("app-server") && !args.includes("proxy");
-  const isDaemonUnix = isAppServer && args.includes("unix://");
+  // 真实参数是 `--listen unix:///path`，不能只匹配裸的 `unix://`。
+  const isDaemonUnix = isAppServer && args.some((arg) => arg.startsWith("unix://"));
 
   if (isAppServer) {
-    let owner = "other";
-    if (cmd.includes("/Applications/ChatGPT.app/")) owner = "chatgpt";
-    else if (cmd.includes("/.trae-cn/")) owner = "trae";
-    else if (cmd.includes("WorkBuddy")) owner = "workbuddy";
-    return { kind: isDaemonUnix ? "app-server-daemon" : "app-server", owner };
+    return {
+      kind: isDaemonUnix ? "app-server-daemon" : "app-server",
+      owner: attributeOwner(row, byPid),
+    };
   }
 
   // 终端里的 TUI 会话（无 app-server 子参数，挂载在 tty 上）
@@ -73,7 +102,7 @@ export function discoverCodexProcesses() {
   const appServers = [];
   const tuis = [];
   for (const row of rows) {
-    const c = classify(row);
+    const c = classifyProcess(row, byPid);
     if (!c) continue;
     const entry = {
       pid: row.pid,
