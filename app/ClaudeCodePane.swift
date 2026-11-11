@@ -23,6 +23,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
     private var syncingRemote = false
     private var envFingerprint: String?
     private var watchTimer: Timer?
+    private var didLaunchSync = false
     private let defaults = UserDefaults.standard
     private let autoSyncCheck = NSButton(checkboxWithTitle: "自动同步远端", target: nil, action: nil)
 
@@ -132,17 +133,26 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
 
     func onShow() {
         refresh()
-        startWatchIfNeeded()
+        startWatching()
     }
 
     deinit { watchTimer?.invalidate() }
 
     /// 本地 cc-switch / 手动改动 ~/.claude/settings.json 时，自动刷新列表并同步远端。
-    private func startWatchIfNeeded() {
+    /// App 启动时就会调用（不要求先打开本页），第一次比对时顺带把远端对齐一次。
+    func startWatching() {
         guard mode == .code, watchTimer == nil else { return }
         let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.watchTick() }
         RunLoop.main.add(timer, forMode: .common)
         watchTimer = timer
+        // App 启动时先对齐一次远端（本机为准），之后每 3 秒跟着本机配置变化走。
+        if autoSyncCheck.state == .on, !didLaunchSync {
+            didLaunchSync = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, !self.syncingRemote else { return }
+                self.syncRemotes(auto: true)
+            }
+        }
     }
 
     @objc private func autoSyncToggled() {
