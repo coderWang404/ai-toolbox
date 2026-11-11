@@ -55,8 +55,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var codexNote: NSTextField!
     private var providerTableHeight: NSLayoutConstraint!
     private var codexPane: NSView!
-    private var claudePane: ClaudeCodePane!
-    private var claudePage: NSView!
+    private var claudeCodePane: ClaudeProvidersPane!
+    private var claudeCodePage: NSView!
+    private var claudeDesktopPane: ClaudeProvidersPane!
+    private var claudeDesktopPage: NSView!
     private var ccPane: NSView!
     private var ccSyncSwitch: NSSwitch!
     private var ccStatusLabel: StatusLine!
@@ -465,8 +467,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         speedPane = speedController.root
 
         codexPane = wrapPage("Codex", "跟随 cc-switch 热切换 Codex 供应商", codexPane)
-        claudePane = ClaudeCodePane()
-        claudePage = wrapPage("Claude Code", "跟随 cc-switch 切换 Claude Code 供应商（写入 ~/.claude/settings.json）", claudePane)
+        claudeCodePane = ClaudeProvidersPane(mode: .code)
+        claudeCodePage = wrapPage("Claude Code", "跟随 cc-switch 切换 Claude Code 供应商（写入 ~/.claude/settings.json）", claudeCodePane)
+        claudeDesktopPane = ClaudeProvidersPane(mode: .desktop)
+        claudeDesktopPage = wrapPage("Claude Desktop", "跟随 cc-switch 切换 Claude Desktop 供应商（写 Claude-3p 配置并重启应用）", claudeDesktopPane)
         ccPane = wrapPage("cc-switch 同步", "以本机 cc-switch 为准，同步到远程机器", ccPane)
 
         sidebar = SettingsSidebarController()
@@ -474,7 +478,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let content = NSViewController()
         let host = NSView()
         host.wantsLayer = true
-        for pane in [codexPane!, claudePage!, ccPane!, iqPane!, quotaMergePane!, gatewayMergePane!, speedPane!] {
+        for pane in [codexPane!, claudeCodePage!, claudeDesktopPage!, ccPane!, iqPane!, quotaMergePane!, gatewayMergePane!, speedPane!] {
             pane.translatesAutoresizingMaskIntoConstraints = false
             host.addSubview(pane)
         NSLayoutConstraint.activate([
@@ -497,7 +501,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         split.splitView.setPosition(220, ofDividerAt: 0)
 
         let savedPage = defaults.integer(forKey: "mainPage")
-        showPage([0, 1, 2, 3, 4, 5, 6].contains(savedPage) ? savedPage : 0)
+        showPage([0, 1, 2, 3, 4, 5, 6, 7].contains(savedPage) ? savedPage : 0)
         if ccSyncEnabled() { startCcSwitchFollow() }
         startIqCatalogWatch()
     }
@@ -1608,7 +1612,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     private func showPage(_ index: Int) {
-        let pages = [codexPane, claudePage, ccPane, iqPane, quotaMergePane, gatewayMergePane, speedPane]
+        let pages = [codexPane, claudeCodePage, claudeDesktopPage, ccPane, iqPane, quotaMergePane, gatewayMergePane, speedPane]
         let visible = pane(for: index)
         for pane in pages {
             pane?.isHidden = pane !== visible
@@ -1618,7 +1622,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             scrollToTop(scroll)
             DispatchQueue.main.async { [weak self] in self?.scrollToTop(scroll) }
         }
-        if index == 6 { claudePane?.onShow() }
+        if index == 6 { claudeCodePane?.onShow() }
+        if index == 7 { claudeDesktopPane?.onShow() }
         if index == 2 { refreshIq() }
         if index == 3 { quotaMerged?.onShow() }
         if index == 4 { gatewayMerged?.onShow() }
@@ -1628,7 +1633,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     private func pane(for index: Int) -> NSView? {
         switch index {
-        case 6: return claudePage
+        case 6: return claudeCodePage
+        case 7: return claudeDesktopPage
         case 1: return ccPane
         case 2: return iqPane
         case 3: return quotaMergePane

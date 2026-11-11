@@ -181,6 +181,55 @@ struct ClaudeSwitchResult: Codable {
     let synced: Bool?
 }
 
+struct ClaudeDesktopProviderSummary: Codable {
+    let id: String
+    let name: String
+    let isCurrent: Bool?
+    let host: String?
+    let model: String?
+    let baseUrl: String?
+    let official: Bool?
+    let proxyMode: Bool?
+}
+
+struct ClaudeAppliedProfile: Codable {
+    let baseUrl: String?
+    let host: String?
+    let tokenTail: String?
+    let provider: String?
+}
+
+struct ClaudeDesktopListResult: Codable {
+    let ok: Bool
+    let error: String?
+    let currentId: String?
+    let providers: [ClaudeDesktopProviderSummary]?
+    let applied: ClaudeAppliedProfile?
+}
+
+struct ClaudeDesktopSwitchResult: Codable {
+    let ok: Bool
+    let error: String?
+    let provider: ClaudeDesktopProviderSummary?
+    let applied: ClaudeAppliedProfile?
+    let reload: ReloadDetail?
+}
+
+struct ClaudeRemoteHost: Codable {
+    let label: String?
+    let host: String?
+    let ok: Bool?
+    let changed: Bool?
+    let error: String?
+}
+
+struct ClaudeSyncRemoteResult: Codable {
+    let ok: Bool
+    let error: String?
+    let baseUrl: String?
+    let hosts: [ClaudeRemoteHost]?
+}
+
 struct LatestRemoteVersions: Codable {
     let codex: String?
     let ccswitch: String?

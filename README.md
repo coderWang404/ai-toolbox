@@ -82,6 +82,10 @@ ai-toolbox switch <名称或 ID>       # 切换供应商并热重启 Codex（核
 ai-toolbox claude-list             # 列出 cc-switch 里的 Claude Code 供应商
 ai-toolbox claude-current          # 查看 Claude Code 当前生效的端点与模型
 ai-toolbox claude-switch <名称或 ID> # 切换 Claude Code（写 ~/.claude/settings.json）
+ai-toolbox claude-sync-remote       # 把 Claude Code 配置同步到远程（只换 env）
+ai-toolbox cdesktop-list           # 列出 Claude Desktop 供应商
+ai-toolbox cdesktop-current        # 查看 Claude Desktop 当前网关
+ai-toolbox cdesktop-switch <名称>   # 切换 Claude Desktop（写 Claude-3p 并重启应用）
 ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换后用这个）
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
 ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔离寄存
@@ -214,7 +218,16 @@ Codex 桌面端把项目列表 / 会话归属按 ChatGPT 账号隔离。cc-switc
 - 切换时把卡片的 `env` **整块替换**，其余用户设置（theme、权限、modelSettings 等）原样保留；
 - 同时把 cc-switch 的 `is_current` 和 `currentProviderClaude` 标记同步回去；
 - 写盘前备份到 `~/.claude/settings.json.bak_*`；
-- Claude Code 在启动时读配置，所以「新开会话生效」，不需要重启进程。
+- Claude Code 在启动时读配置，所以「新开会话生效」，不需要重启进程；
+- 页面上的「同步到远端」会把本机 `env` 推到远程机器的 `~/.claude/settings.json`（远端其它设置保留）。
+
+## Claude Desktop 页
+
+Claude Desktop 走的是 Claude-3p 的 `configLibrary` 配置（不是 settings.json）：
+写入 `~/Library/Application Support/Claude-3p/configLibrary/<profile>.json`，
+并可能需要把 `claude_desktop_config.json` 的 `deploymentMode` 设为 `3p`。
+桌面应用只在启动时读取，所以切换后会**退出并重新打开 Claude.app**；
+支持直连供应商和 cc-switch 本地代理两种模式。
 
 ## 远端版本检查 / 更新
 

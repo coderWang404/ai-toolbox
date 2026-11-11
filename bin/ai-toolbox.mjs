@@ -56,6 +56,17 @@ import {
 import { ensureAuthPreserved } from "../src/codex-auth.mjs";
 import { probeRemotes, latestVersions, planUpdates, updateHost, localApplications } from "../src/remote-versions.mjs";
 import { listClaudeProviders, getCurrentClaudeProvider, switchClaudeProvider, claudeStatus } from "../src/claude-code.mjs";
+import {
+  listClaudeDesktopProviders,
+  claudeDesktopSummary,
+  currentClaudeDesktopId,
+  findClaudeDesktopProvider,
+  applyClaudeDesktopProvider,
+  syncClaudeDesktopCurrent,
+  readAppliedProfile,
+  restartClaudeDesktop,
+} from "../src/claude-desktop.mjs";
+import { syncClaudeRemotes } from "../src/claude-remote.mjs";
 import { installCcSwitchBinary, installCodexBinary } from "../src/remote-install.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
@@ -67,6 +78,10 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox claude-list           列出 Claude Code 供应商
   ai-toolbox claude-current        查看 Claude Code 当前生效的配置
   ai-toolbox claude-switch <名称/ID>  切换 Claude Code 供应商（写 ~/.claude/settings.json）
+  ai-toolbox cdesktop-list         列出 Claude Desktop 供应商
+  ai-toolbox cdesktop-current      查看 Claude Desktop 当前网关
+  ai-toolbox cdesktop-switch <名称/ID>  切换 Claude Desktop（写 Claude-3p 配置并重启应用）
+  ai-toolbox claude-sync-remote    把本机 Claude Code 配置同步到远程（只换 env）
   ai-toolbox reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
   ai-toolbox project-state         查看 Codex 项目状态是否被账号隔离寄存
   ai-toolbox repair-projects       把被寄存的项目/会话归属恢复到 Codex 界面（Codex 需退出）
@@ -784,6 +799,56 @@ function cmdClaudeSwitch(query, opts) {
   return { command: "claude-switch", ...result, provider: { id: result.provider.id, name: result.provider.name } };
 }
 
+function cmdClaudeDesktopList(opts) {
+  const providers = listClaudeDesktopProviders();
+  const current = currentClaudeDesktopId();
+  if (!opts.json) {
+    console.log(`\nClaude Desktop 供应商（共 ${providers.length} 个）:\n`);
+    for (const p of providers) {
+      const mark = p.id === current ? "●" : "○";
+      const mode = p.proxyMode ? "（走 cc-switch 代理）" : p.official ? "（官方）" : "";
+      console.log(`  ${mark} ${p.name.padEnd(22)} ${(p.host ?? "-").padEnd(26)} ${mode}`);
+    }
+    console.log("\n  切换: ai-toolbox cdesktop-switch <名称>");
+  }
+  return {
+    command: "cdesktop-list",
+    currentId: current,
+    providers: providers.map((p) => claudeDesktopSummary(p)),
+    applied: readAppliedProfile(),
+  };
+}
+
+function cmdClaudeDesktopCurrent(opts) {
+  const applied = readAppliedProfile();
+  const current = currentClaudeDesktopId();
+  const provider = listClaudeDesktopProviders().find((p) => p.id === current) ?? null;
+  if (!opts.json) {
+    opts.log(`\ncc-switch 记录: ${provider?.name ?? "(无)"}`);
+    opts.log(`实际网关: ${applied?.host ?? "-"}  ${applied ? `key …${applied.tokenTail ?? ""}` : ""}`);
+    if (applied && provider?.baseUrl && applied.baseUrl !== provider.baseUrl) opts.log("  ⚠️ 与 cc-switch 记录不一致");
+  }
+  return { command: "cdesktop-current", applied, provider: provider ? { id: provider.id, name: provider.name } : null };
+}
+
+async function cmdClaudeDesktopSwitch(query, opts) {
+  const provider = findClaudeDesktopProvider(query);
+  if (!provider) throw new Error(`找不到 Claude Desktop 供应商「${query}」`);
+  const applied = applyClaudeDesktopProvider(provider);
+  syncClaudeDesktopCurrent(provider.id);
+  let reload = null;
+  if (opts.reload) reload = await restartClaudeDesktop({ log: opts.log });
+  if (!opts.json) {
+    opts.log(`\n✔ 已切换到 ${provider.name}（${applied?.host ?? "-"}）`);
+    opts.log(`  skill ${reload ? "已重启 Claude Desktop" : "未重启，下次打开 Claude 生效"}`);
+  }
+  return { command: "cdesktop-switch", provider: claudeDesktopSummary(provider), applied, reload };
+}
+
+async function cmdClaudeSyncRemote(opts) {
+  return syncClaudeRemotes({ dryRun: opts.dryRun, log: opts.log, hosts: opts.hosts?.length ? opts.hosts : null });
+}
+
 async function cmdSyncRemote(opts) {
   const remote = await syncRemotes({ dryRun: opts.dryRun, log: opts.log });
   return { command: "sync-remote", remote };
@@ -1203,6 +1268,19 @@ async function main() {
       break;
     case "claude-current":
       result = cmdClaudeCurrent(opts);
+      break;
+    case "claude-sync-remote":
+      result = await cmdClaudeSyncRemote(opts);
+      break;
+    case "cdesktop-list":
+      result = cmdClaudeDesktopList(opts);
+      break;
+    case "cdesktop-current":
+      result = cmdClaudeDesktopCurrent(opts);
+      break;
+    case "cdesktop-switch":
+      if (!arg) throw new Error("用法: ai-toolbox cdesktop-switch <名称/ID>");
+      result = await cmdClaudeDesktopSwitch(arg, opts);
       break;
     case "claude-switch":
       if (!arg) throw new Error("用法: ai-toolbox claude-switch <名称/ID>");

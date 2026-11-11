@@ -346,6 +346,18 @@ final class Backend {
         try decode(ClaudeSwitchResult.self, from: run(["claude-switch", id], timeout: 60))
     }
 
+    func claudeDesktopList() throws -> ClaudeDesktopListResult {
+        try decode(ClaudeDesktopListResult.self, from: run(["cdesktop-list"], timeout: 40))
+    }
+
+    func claudeDesktopSwitch(_ id: String) throws -> ClaudeDesktopSwitchResult {
+        try decode(ClaudeDesktopSwitchResult.self, from: run(["cdesktop-switch", id], timeout: 150))
+    }
+
+    func claudeSyncRemote() throws -> ClaudeSyncRemoteResult {
+        try decode(ClaudeSyncRemoteResult.self, from: run(["claude-sync-remote"], timeout: 180))
+    }
+
     /// 检查远端 Codex / cc-switch CLI 版本。
     func remoteVersions() throws -> RemoteVersionsResult {
         try decode(RemoteVersionsResult.self, from: run(["remote-versions"], timeout: 180))
