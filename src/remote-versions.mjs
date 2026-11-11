@@ -59,9 +59,10 @@ export function isOutdated(current, latest) {
 function probeProgram() {
   return `
 import json, platform, subprocess
+NVM = 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; '
 def sh(cmd):
     try:
-        p = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=40)
+        p = subprocess.run(["bash", "-lc", NVM + cmd], capture_output=True, text=True, timeout=40)
         return ((p.stdout or "") + (p.stderr or "")).strip()
     except Exception:
         return ""
@@ -76,9 +77,10 @@ function updateProgram({ codex, ccswitch, codexVersion, ccswitchVersion }) {
   const ccswitchArgs = ccswitchVersion ? ` --version v${String(ccswitchVersion).replace(/^v/, "")}` : "";
   return `
 import json, subprocess
+NVM = 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; '
 def sh(cmd, timeout=600):
     try:
-        p = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(["bash", "-lc", NVM + cmd], capture_output=True, text=True, timeout=timeout)
         return {"code": p.returncode, "out": ((p.stdout or "") + (p.stderr or "")).strip()[-1200:]}
     except subprocess.TimeoutExpired:
         return {"code": -1, "out": "timeout"}

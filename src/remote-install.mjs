@@ -78,9 +78,10 @@ function installProgram(kind, tmpPath) {
 import json, os, shutil, subprocess
 src = ${JSON.stringify(tmpPath)}
 name = ${JSON.stringify(binName)}
+NVM = 'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1; '
 def out(cmd):
     try:
-        return subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=40).stdout.strip()
+        return subprocess.run(["bash", "-lc", NVM + cmd], capture_output=True, text=True, timeout=40).stdout.strip()
     except Exception:
         return ""
 current = out("command -v " + name + " || true")
