@@ -46,7 +46,7 @@ test("planUpdates 标出需要更新的主机与工具", () => {
     [
       ["231", true, false],
       ["217", false, true],
-      ["219", false, false],
+      ["219", true, false], // 没装 codex：也要标记为待安装
       ["230", false, false],
     ],
   );

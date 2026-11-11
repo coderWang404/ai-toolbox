@@ -54,7 +54,8 @@ import {
   projectStateReport,
 } from "../src/codex-project-state.mjs";
 import { ensureAuthPreserved } from "../src/codex-auth.mjs";
-import { probeRemotes, latestVersions, planUpdates, updateHost } from "../src/remote-versions.mjs";
+import { probeRemotes, latestVersions, planUpdates, updateHost, localApplications } from "../src/remote-versions.mjs";
+import { installCcSwitchBinary, installCodexBinary } from "../src/remote-install.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -600,14 +601,21 @@ function cmdRepairProjects(opts) {
 
 async function cmdRemoteVersions(opts) {
   const { log } = opts;
-  const [rows, latest] = await Promise.all([
+  const [rows, latest, local] = await Promise.all([
     probeRemotes(),
     opts.latest ? latestVersions() : Promise.resolve(null),
+    Promise.resolve(localApplications()),
   ]);
   const planned = latest ? planUpdates(rows, latest) : rows;
   if (!opts.json) {
+    log("\n本机");
+    log(
+      `  ✔ ChatGPT.app ${local.codexApp ?? "未安装"}（codex CLI ${local.codexCli ?? "-"}）   CC Switch ${local.ccSwitchApp ?? "未安装"}${
+        latest?.ccSwitchApp ? `（最新 ${latest.ccSwitchApp}）` : ""
+      }`,
+    );
     if (latest) {
-      log(`\n远端版本（最新：codex ${latest.codex ?? "?"} · cc-switch-cli ${latest.ccswitch ?? "?"}）`);
+      log(`\n远端（最新：codex ${latest.codex ?? "?"} · cc-switch-cli ${latest.ccswitch ?? "?"}）`);
       for (const [tool, err] of Object.entries(latest.errors ?? {})) if (err) log(`  ⚠️ ${tool} 版本查询失败: ${err}`);
     } else {
       log("\n远端版本");
@@ -630,7 +638,7 @@ async function cmdRemoteVersions(opts) {
       log("\n有更新可装：ai-toolbox remote-update");
     }
   }
-  return { command: "remote-versions", latest, hosts: planned };
+  return { command: "remote-versions", latest, local, hosts: planned };
 }
 
 async function cmdRemoteUpdate(opts) {
@@ -653,30 +661,65 @@ async function cmdRemoteUpdate(opts) {
     return { command: "remote-update", dryRun: true, latest, hosts: planned, targets: targets.map((r) => r.label) };
   }
 
-  const results = [];
-  for (const row of targets) {
-    opts.progress?.(`→ 更新 ${row.label}…`);
-    const result = await updateHost(
-      { host: row.host, label: row.label },
-      {
-        codex: doCodex,
-        ccswitch: doCcSwitch,
-        codexVersion: row.codexUpdate ? latest.codex : null,
-        ccswitchVersion: row.ccswitchUpdate ? latest.ccswitch : null,
-      },
-    );
-    results.push(result);
-    if (!opts.json) {
-      if (!result.ok) {
-        log(`  ❌ ${row.label}: ${result.error ?? "更新失败"}${result.ccswitch?.output ? `（${result.ccswitch.output.slice(-160)}）` : ""}`);
-      } else {
-        const parts = [];
-        if (doCodex) parts.push(`codex ${row.codex ?? "-"} → ${result.codex.after ?? "?"}`);
-        if (doCcSwitch) parts.push(`cc-switch ${row.ccswitch ?? "-"} → ${result.ccswitch.after ?? "?"}`);
-        log(`  ✔ ${row.label}: ${parts.join(" · ")}`);
+  const results = await Promise.all(
+    targets.map(async (row) => {
+      opts.progress?.(`→ 更新 ${row.label}…`);
+      const result = await updateHost(
+        { host: row.host, label: row.label },
+        {
+          codex: doCodex,
+          ccswitch: doCcSwitch,
+          codexVersion: row.codexUpdate ? latest.codex : null,
+          ccswitchVersion: row.ccswitchUpdate ? latest.ccswitch : null,
+        },
+      );
+      if (!opts.json) {
+        if (!result.ok) {
+          const detail = result.error ?? result.ccswitch?.output?.slice(-160) ?? "更新失败";
+          log(`  ❌ ${row.label}: ${detail}`);
+        } else {
+          const parts = [];
+          if (doCodex) parts.push(`codex ${row.codex ?? "-"} → ${result.codex.after ?? "?"}`);
+          if (doCcSwitch) parts.push(`cc-switch ${row.ccswitch ?? "-"} → ${result.ccswitch.after ?? "?"}`);
+          log(`  ✔ ${row.label}: ${parts.join(" · ")}`);
+        }
+      }
+      return result;
+    }),
+  );
+
+  // 远端常常访问不了 GitHub / 没有 npm：回退成本机下载 + scp 直装
+  const fallback = [];
+  if (opts.download) {
+    for (const [index, result] of results.entries()) {
+      const row = targets[index];
+      if (!row) continue;
+      if (doCcSwitch && result.ccswitch && result.ccswitch.exitCode !== 0) {
+        fallback.push({ row, tool: "ccswitch", result });
+      }
+      if (doCodex && result.codex && result.codex.exitCode !== 0) {
+        fallback.push({ row, tool: "codex", result });
+      }
+    }
+    for (const item of fallback) {
+      opts.progress?.(`→ ${item.row.label}: ${item.tool} 直装（本机下载后推送）…`);
+      try {
+        const installed =
+          item.tool === "ccswitch"
+            ? await installCcSwitchBinary({ host: item.row.host, label: item.row.label, user: item.row.user, port: item.row.port, identityFile: item.row.identityFile }, latest.ccswitch)
+            : await installCodexBinary({ host: item.row.host, label: item.row.label, user: item.row.user, port: item.row.port, identityFile: item.row.identityFile }, latest.codex);
+        item.result.ok = true;
+        if (item.tool === "ccswitch") item.result.ccswitch = { ...item.result.ccswitch, after: installed.version, installedAt: installed.installed };
+        else item.result.codex = { ...item.result.codex, after: installed.version, installedAt: installed.installed };
+        item.result.fallback = true;
+        if (!opts.json) log(`  ⤵ ${item.row.label}: ${item.tool} 直装完成 → ${installed.version ?? "?"}（${installed.installed ?? "-"}）`);
+      } catch (err) {
+        item.result.ok = false;
+        if (!opts.json) log(`  ❌ ${item.row.label}: ${item.tool} 直装失败 ${String(err.message).slice(0, 160)}`);
       }
     }
   }
+
   return { command: "remote-update", latest, hosts: planned, results };
 }
 
@@ -982,6 +1025,7 @@ async function main() {
       "no-remote": { type: "boolean", default: false },
       "no-model-probe": { type: "boolean", default: false },
       "no-latest": { type: "boolean", default: false },
+      "no-download": { type: "boolean", default: false },
       codex: { type: "boolean", default: false },
       ccswitch: { type: "boolean", default: false },
       timeout: { type: "string" },
@@ -1014,6 +1058,7 @@ async function main() {
     remote: !values["no-remote"],
     modelProbe: !values["no-model-probe"],
     latest: !values["no-latest"],
+    download: !values["no-download"],
     codex: values.codex || !values.ccswitch,
     ccswitch: values.ccswitch || !values.codex,
     timeoutMs: values.timeout ? Math.max(10, Number(values.timeout)) * 1000 : 120000,
@@ -1036,6 +1081,15 @@ async function main() {
   };
 
   const [command, arg] = positionals;
+  if (!values.timeout) {
+    const defaults = {
+      "remote-update": 1800 * 1000,
+      "remote-versions": 300 * 1000,
+      "sync-remote": 300 * 1000,
+      "sync-ccswitch": 600 * 1000,
+    };
+    opts.timeoutMs = defaults[command] ?? 120 * 1000;
+  }
   if (values.help || !command) {
     if (json) console.log(JSON.stringify({ command: "help", text: HELP }));
     else console.log(HELP);

@@ -160,10 +160,17 @@ struct RemoteVersionInfo: Codable {
     let error: String?
 }
 
+struct LocalAppsInfo: Codable {
+    let codexApp: String?
+    let codexCli: String?
+    let ccSwitchApp: String?
+}
+
 struct RemoteVersionsResult: Codable {
     let ok: Bool
     let error: String?
     let latest: LatestRemoteVersions?
+    let local: LocalAppsInfo?
     let hosts: [RemoteVersionInfo]?
 }
 

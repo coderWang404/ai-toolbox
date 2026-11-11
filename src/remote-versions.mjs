@@ -4,7 +4,9 @@
 //   - Codex CLI：npm 全局包 @openai/codex，用 `npm i -g` 升级
 //   - cc-switch CLI：saladday/cc-switch-cli（Rust，`cc-switch update` 自更新）
 // 本机 GUI 的 CC Switch 是另一个项目（farion1231/cc-switch），不在这里管。
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import { sshArgs, loadRemotes } from "./remote-sync.mjs";
 
@@ -12,6 +14,7 @@ const execFileAsync = promisify(execFile);
 
 const CODEX_REGISTRY = "https://registry.npmjs.org/@openai/codex/latest";
 const CCSWITCH_RELEASES = "https://api.github.com/repos/saladday/cc-switch-cli/releases/latest";
+const CCSWITCH_APP_RELEASES = "https://api.github.com/repos/farion1231/cc-switch/releases/latest";
 const MARKER = "AI_TOOLBOX_REMOTE_JSON:";
 
 /** "codex-cli 0.151.0" / "0.151.0" → "0.151.0" */
@@ -148,6 +151,42 @@ export async function probeRemotes({ hosts = null } = {}) {
   return Promise.all(list.map((entry) => probeHost(entry)));
 }
 
+/** 读取本机 .app 的 CFBundleShortVersionString。 */
+export function readAppVersion(appPath) {
+  const plist = path.join(appPath, "Contents", "Info.plist");
+  if (!existsSync(plist)) return null;
+  try {
+    const json = execFileSync("plutil", ["-convert", "json", "-o", "-", plist], { encoding: "utf8" });
+    const data = JSON.parse(json);
+    return data.CFBundleShortVersionString ?? data.CFBundleVersion ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 本机三套软件：Codex 桌面版、其内置 codex CLI、CC Switch 桌面版。 */
+export function localApplications() {
+  const codexAppPath = "/Applications/ChatGPT.app";
+  const ccSwitchAppPath = "/Applications/CC Switch.app";
+  let codexCli = null;
+  try {
+    const out = execFileSync("bash", ["-lc", "command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null | head -1"], {
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    codexCli = parseCodexVersion(out);
+  } catch {
+    codexCli = null;
+  }
+  return {
+    codexApp: readAppVersion(codexAppPath),
+    codexAppPath: existsSync(codexAppPath) ? codexAppPath : null,
+    codexCli,
+    ccSwitchApp: readAppVersion(ccSwitchAppPath),
+    ccSwitchAppPath: existsSync(ccSwitchAppPath) ? ccSwitchAppPath : null,
+  };
+}
+
 /** 查线上最新版本；任一失败不影响另一个。 */
 export async function latestVersions({ fetchImpl = fetch } = {}) {
   const get = async (url) => {
@@ -158,16 +197,19 @@ export async function latestVersions({ fetchImpl = fetch } = {}) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
   };
-  const [codex, ccswitch] = await Promise.allSettled([
+  const [codex, ccswitch, ccSwitchApp] = await Promise.allSettled([
     get(CODEX_REGISTRY).then((data) => data?.version ?? null),
     get(CCSWITCH_RELEASES).then((data) => parseCodexVersion(data?.tag_name ?? null)),
+    get(CCSWITCH_APP_RELEASES).then((data) => parseCodexVersion(data?.tag_name ?? null)),
   ]);
   return {
     codex: codex.status === "fulfilled" ? codex.value : null,
     ccswitch: ccswitch.status === "fulfilled" ? ccswitch.value : null,
+    ccSwitchApp: ccSwitchApp.status === "fulfilled" ? ccSwitchApp.value : null,
     errors: {
       codex: codex.status === "rejected" ? String(codex.reason?.message ?? codex.reason) : null,
       ccswitch: ccswitch.status === "rejected" ? String(ccswitch.reason?.message ?? ccswitch.reason) : null,
+      ccSwitchApp: ccSwitchApp.status === "rejected" ? String(ccSwitchApp.reason?.message ?? ccSwitchApp.reason) : null,
     },
   };
 }
@@ -176,8 +218,9 @@ export async function latestVersions({ fetchImpl = fetch } = {}) {
 export function planUpdates(rows, latest) {
   return rows.map((row) => ({
     ...row,
-    codexUpdate: row.ok && isOutdated(row.codex, latest?.codex),
-    ccswitchUpdate: row.ok && isOutdated(row.ccswitch, latest?.ccswitch),
+    // 没装（null）也视为需要安装
+    codexUpdate: row.ok && (row.codex ? isOutdated(row.codex, latest?.codex) : Boolean(latest?.codex)),
+    ccswitchUpdate: row.ok && (row.ccswitch ? isOutdated(row.ccswitch, latest?.ccswitch) : Boolean(latest?.ccswitch)),
   }));
 }
 

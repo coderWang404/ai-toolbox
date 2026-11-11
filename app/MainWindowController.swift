@@ -248,6 +248,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let checkButton = NSButton(title: "立即检查", target: self, action: #selector(checkCcSwitchNow))
         checkButton.bezelStyle = .rounded
         checkButton.controlSize = .regular
+        let versionsButton = NSButton(title: "检查远端版本", target: self, action: #selector(checkRemoteVersionsNow))
+        versionsButton.bezelStyle = .rounded
+        versionsButton.controlSize = .regular
         ccRows = NSStackView()
         ccRows.orientation = .vertical
         ccRows.alignment = .leading
@@ -265,7 +268,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         ])
         let syncRow = SettingRow(title: "实时同步", subtitle: "以本机配置为准，连上后先检查再更新", accessory: ccSyncSwitch)
         let syncGroup = GroupBox()
-        syncGroup.addRow(NSStackView(views: [syncRow, flexibleSpace(), checkButton]))
+        syncGroup.addRow(NSStackView(views: [syncRow, versionsButton, flexibleSpace(), checkButton]))
         let ccBody = NSStackView(views: [
             SectionView(title: "同步", content: syncGroup),
             SectionView(title: "远程机器", content: ccGroup),
@@ -1162,6 +1165,42 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     self.setStatus("❌ 自动跟随失败: \(error.localizedDescription)")
                     self.finishAutoReload(onDone: onDone)
                 }
+            }
+        }
+    }
+
+    @objc private func checkRemoteVersionsNow() {
+        setStatus("正在检查本机与远端版本…")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.backend.remoteVersions()
+                var lines: [String] = []
+                if let local = result.local {
+                    lines.append(
+                        "本机：ChatGPT.app \(local.codexApp ?? "未安装")（codex \(local.codexCli ?? "-")）· CC Switch \(local.ccSwitchApp ?? "未安装")"
+                    )
+                }
+                for row in result.hosts ?? [] {
+                    if row.ok == false {
+                        lines.append("❌ \(row.label ?? row.host ?? "")：\(row.error ?? "失败")")
+                        continue
+                    }
+                    let codex = row.codex.map { "\($0)\(row.codexUpdate == true ? " → \(result.latest?.codex ?? "?")" : "")" } ?? "(无)"
+                    let cc = row.ccswitch.map { "\($0)\(row.ccswitchUpdate == true ? " → \(result.latest?.ccswitch ?? "?")" : "")" } ?? "(无)"
+                    lines.append("\(row.label ?? "")（\(row.hostname ?? "")）  codex \(codex) · cc-switch \(cc)")
+                }
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "版本检查"
+                    alert.informativeText = (lines.isEmpty ? "没有配置远端主机" : lines.joined(separator: "\n"))
+                        + "\n\n更新远端：ai-toolbox remote-update"
+                    alert.addButton(withTitle: "好")
+                    alert.runModal()
+                    self.setStatus("版本检查完成")
+                }
+            } catch {
+                DispatchQueue.main.async { self.setStatus("版本检查失败：\(error.localizedDescription)") }
             }
         }
     }
