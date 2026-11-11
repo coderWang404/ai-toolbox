@@ -55,6 +55,7 @@ import {
 } from "../src/codex-project-state.mjs";
 import { ensureAuthPreserved } from "../src/codex-auth.mjs";
 import { probeRemotes, latestVersions, planUpdates, updateHost, localApplications } from "../src/remote-versions.mjs";
+import { listClaudeProviders, getCurrentClaudeProvider, switchClaudeProvider, claudeStatus } from "../src/claude-code.mjs";
 import { installCcSwitchBinary, installCodexBinary } from "../src/remote-install.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
@@ -63,6 +64,9 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox list                  列出所有 codex 供应商
   ai-toolbox current               查看当前供应商与生效配置
   ai-toolbox switch <名称/ID>      切换供应商并热重启 Codex（核心命令）
+  ai-toolbox claude-list           列出 Claude Code 供应商
+  ai-toolbox claude-current        查看 Claude Code 当前生效的配置
+  ai-toolbox claude-switch <名称/ID>  切换 Claude Code 供应商（写 ~/.claude/settings.json）
   ai-toolbox reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
   ai-toolbox project-state         查看 Codex 项目状态是否被账号隔离寄存
   ai-toolbox repair-projects       把被寄存的项目/会话归属恢复到 Codex 界面（Codex 需退出）
@@ -732,6 +736,54 @@ async function cmdRemoteUpdate(opts) {
   return { command: "remote-update", latest, hosts: planned, results };
 }
 
+function cmdClaudeList(opts) {
+  const providers = listClaudeProviders();
+  const current = getCurrentClaudeProvider();
+  if (!opts.json) {
+    console.log(`\nClaude Code 供应商（共 ${providers.length} 个）:\n`);
+    for (const p of providers) {
+      const mark = current?.id === p.id ? "●" : "○";
+      console.log(`  ${mark} ${p.name.padEnd(18)} ${(p.host ?? "-").padEnd(28)} model=${p.model ?? "-"}  [${p.id}]`);
+    }
+    console.log("\n  ● = 当前供应商。切换: ai-toolbox claude-switch <名称>");
+  }
+  return {
+    command: "claude-list",
+    currentId: current?.id ?? null,
+    providers: providers.map(({ settings, ...rest }) => rest),
+  };
+}
+
+function cmdClaudeCurrent(opts) {
+  const status = claudeStatus();
+  if (!opts.json) {
+    opts.log(`\n配置文件: ${status.settingsPath ?? "-"}`);
+    if (status.ok) {
+      opts.log(`实际生效: ${status.host ?? "-"}  model=${status.model ?? "-"}`);
+      opts.log(`cc-switch 记录: ${status.provider?.name ?? "(无)"}${status.matchesProvider === false ? "  ⚠️ 与生效端点不一致" : ""}`);
+    } else {
+      opts.log(`读取失败: ${status.error}`);
+    }
+  }
+  return { command: "claude-current", ...status };
+}
+
+function cmdClaudeSwitch(query, opts) {
+  const result = switchClaudeProvider(query, { dryRun: opts.dryRun });
+  if (!opts.json) {
+    if (opts.dryRun) {
+      opts.log(`[dry-run] 将切换到 ${result.provider.name}（${result.provider.host ?? "-"}）`);
+    } else {
+      opts.log(`\n✔ 已切换到 ${result.provider.name}（${result.endpoint ?? "-"}）`);
+      opts.log(`  已写入: ${result.settingsPath}`);
+      if (result.backupPath) opts.log(`  已备份: ${result.backupPath}`);
+      if (!result.synced) opts.log("  ⚠️ 同步 cc-switch 当前标记失败，请在 cc-switch 里核对");
+      opts.log("  新开 Claude Code 会话时生效");
+    }
+  }
+  return { command: "claude-switch", ...result, provider: { id: result.provider.id, name: result.provider.name } };
+}
+
 async function cmdSyncRemote(opts) {
   const remote = await syncRemotes({ dryRun: opts.dryRun, log: opts.log });
   return { command: "sync-remote", remote };
@@ -1145,6 +1197,16 @@ async function main() {
       break;
     case "sync-remote":
       result = await cmdSyncRemote(opts);
+      break;
+    case "claude-list":
+      result = cmdClaudeList(opts);
+      break;
+    case "claude-current":
+      result = cmdClaudeCurrent(opts);
+      break;
+    case "claude-switch":
+      if (!arg) throw new Error("用法: ai-toolbox claude-switch <名称/ID>");
+      result = cmdClaudeSwitch(arg, opts);
       break;
     case "remote-versions":
       result = await cmdRemoteVersions(opts);

@@ -143,6 +143,44 @@ struct ProjectSnapshot: Codable {
     let assignments: Int?
 }
 
+struct ClaudeProviderSummary: Codable {
+    let id: String
+    let name: String
+    let isCurrent: Bool?
+    let host: String?
+    let baseUrl: String?
+    let model: String?
+    let tokenTail: String?
+}
+
+struct ClaudeListResult: Codable {
+    let ok: Bool
+    let error: String?
+    let currentId: String?
+    let providers: [ClaudeProviderSummary]?
+}
+
+struct ClaudeCurrentResult: Codable {
+    let ok: Bool
+    let error: String?
+    let settingsPath: String?
+    let host: String?
+    let baseUrl: String?
+    let model: String?
+    let provider: ProviderRef?
+    let matchesProvider: Bool?
+}
+
+struct ClaudeSwitchResult: Codable {
+    let ok: Bool
+    let error: String?
+    let provider: ProviderRef?
+    let endpoint: String?
+    let settingsPath: String?
+    let backupPath: String?
+    let synced: Bool?
+}
+
 struct LatestRemoteVersions: Codable {
     let codex: String?
     let ccswitch: String?

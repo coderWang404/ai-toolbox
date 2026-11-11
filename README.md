@@ -79,6 +79,9 @@ npm link
 ai-toolbox list                    # 列出所有 codex 供应商（● = 当前）
 ai-toolbox current                 # 查看当前供应商 + 实际生效配置 + 运行中的 app-server
 ai-toolbox switch <名称或 ID>       # 切换供应商并热重启 Codex（核心命令）
+ai-toolbox claude-list             # 列出 cc-switch 里的 Claude Code 供应商
+ai-toolbox claude-current          # 查看 Claude Code 当前生效的端点与模型
+ai-toolbox claude-switch <名称或 ID> # 切换 Claude Code（写 ~/.claude/settings.json）
 ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换后用这个）
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
 ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔离寄存
@@ -202,6 +205,16 @@ Codex 桌面端把项目列表 / 会话归属按 ChatGPT 账号隔离。cc-switc
    有可用登录态时，自动还原（官方供应商不还原）；
 2. 建议同时在 cc-switch 里打开「切换时保留官方登录态」
    （`preserveCodexOfficialAuthOnSwitch = true`），从源头上不让登录态被收走。
+
+## Claude Code 页
+
+和 Codex 页同一套逻辑，只是写入目标是 `~/.claude/settings.json`：
+
+- 供应商来自 cc-switch 的 `claude` 卡片（`env` 块：`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / 各档位模型）；
+- 切换时把卡片的 `env` **整块替换**，其余用户设置（theme、权限、modelSettings 等）原样保留；
+- 同时把 cc-switch 的 `is_current` 和 `currentProviderClaude` 标记同步回去；
+- 写盘前备份到 `~/.claude/settings.json.bak_*`；
+- Claude Code 在启动时读配置，所以「新开会话生效」，不需要重启进程。
 
 ## 远端版本检查 / 更新
 
