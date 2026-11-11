@@ -245,6 +245,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let check = NSMenuItem(title: "立即检查", action: #selector(checkCcFromMenu), keyEquivalent: "")
         check.target = self
         menu.addItem(check)
+        let versions = NSMenuItem(title: "检查远端版本…", action: #selector(checkRemoteVersions), keyEquivalent: "")
+        versions.target = self
+        menu.addItem(versions)
         for line in windowController.barHostLines() {
             let item = NSMenuItem(title: "\(line.label)  ·  \(line.ccswitch)", action: nil, keyEquivalent: "")
             item.isEnabled = false
@@ -448,6 +451,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         watcher.start()
         defaults.set(true, forKey: "watchEnabled")
         menuStatus = "已开启自动跟随"
+    }
+
+    @objc private func checkRemoteVersions() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.backend.remoteVersions()
+                let lines = (result.hosts ?? []).map { row -> String in
+                    if row.ok == false { return "❌ \(row.label ?? row.host ?? "")：\(row.error ?? "失败")" }
+                    let codex = row.codex.map { "\($0)\(row.codexUpdate == true ? " → \(result.latest?.codex ?? "?")" : "")" } ?? "(无)"
+                    let cc = row.ccswitch.map { "\($0)\(row.ccswitchUpdate == true ? " → \(result.latest?.ccswitch ?? "?")" : "")" } ?? "(无)"
+                    return "\(row.label ?? "")（\(row.hostname ?? "")）  codex \(codex) · cc-switch \(cc)"
+                }
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "远端版本"
+                    alert.informativeText = (lines.isEmpty ? "没有配置远端主机" : lines.joined(separator: "\n"))
+                        + "\n\n更新：ai-toolbox remote-update"
+                    alert.addButton(withTitle: "好")
+                    alert.runModal()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.windowController.setStatus("远端版本检查失败：\(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     @objc private func openConfig() {

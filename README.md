@@ -85,6 +85,8 @@ ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔
 ai-toolbox repair-projects         # 把被寄存的项目/会话归属恢复到 Codex（Codex 需退出）
 ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
 ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
+ai-toolbox remote-versions         # 检查远端 Codex / cc-switch CLI 版本是否有更新
+ai-toolbox remote-update           # 把远端更新到最新（默认只更新过时的；--dry-run 预览）
 ai-toolbox iq-list                 # 列出可用于智商测试的供应商
 ai-toolbox go-quota                # 查询 OpenCode Go 三窗口额度
 ai-toolbox cline-quota             # 查询 ClinePass 三窗口额度和余额
@@ -200,6 +202,24 @@ Codex 桌面端把项目列表 / 会话归属按 ChatGPT 账号隔离。cc-switc
    有可用登录态时，自动还原（官方供应商不还原）；
 2. 建议同时在 cc-switch 里打开「切换时保留官方登录态」
    （`preserveCodexOfficialAuthOnSwitch = true`），从源头上不让登录态被收走。
+
+## 远端版本检查 / 更新
+
+远端机器上的两套东西各走各的更新渠道：
+
+| 组件 | 来源 | 更新方式 |
+| --- | --- | --- |
+| Codex CLI | npm 全局包 `@openai/codex` | `npm install -g @openai/codex@<latest>` |
+| cc-switch CLI | `saladday/cc-switch-cli` | `cc-switch update` |
+
+```bash
+ai-toolbox remote-versions          # 表格：每台机器的版本、是否落后
+ai-toolbox remote-update --dry-run  # 只预览要更新什么
+ai-toolbox remote-update            # 只更新落后的；--host 231 可限定机器
+ai-toolbox remote-update --ccswitch # 只更新 cc-switch；--codex 只更新 codex
+```
+
+桌面 App 菜单栏「cc-switch」分组里也有「检查远端版本…」。
 
 ## 自动跟随不会连环重启
 

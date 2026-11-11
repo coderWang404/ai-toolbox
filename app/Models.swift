@@ -143,6 +143,30 @@ struct ProjectSnapshot: Codable {
     let assignments: Int?
 }
 
+struct LatestRemoteVersions: Codable {
+    let codex: String?
+    let ccswitch: String?
+}
+
+struct RemoteVersionInfo: Codable {
+    let ok: Bool
+    let host: String?
+    let label: String?
+    let hostname: String?
+    let codex: String?
+    let ccswitch: String?
+    let codexUpdate: Bool?
+    let ccswitchUpdate: Bool?
+    let error: String?
+}
+
+struct RemoteVersionsResult: Codable {
+    let ok: Bool
+    let error: String?
+    let latest: LatestRemoteVersions?
+    let hosts: [RemoteVersionInfo]?
+}
+
 struct ProjectStateReport: Codable {
     let ok: Bool
     let error: String?

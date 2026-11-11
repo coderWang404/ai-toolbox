@@ -54,6 +54,7 @@ import {
   projectStateReport,
 } from "../src/codex-project-state.mjs";
 import { ensureAuthPreserved } from "../src/codex-auth.mjs";
+import { probeRemotes, latestVersions, planUpdates, updateHost } from "../src/remote-versions.mjs";
 
 const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
 
@@ -67,6 +68,8 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox watch                 持续监控配置，切换后自动热重启（推荐常驻）
   ai-toolbox sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
   ai-toolbox remote-status         查看远程正在使用的供应商和密钥尾号
+  ai-toolbox remote-versions       检查远端 Codex / cc-switch CLI 版本是否有更新
+  ai-toolbox remote-update         把远端 Codex / cc-switch 更新到最新（默认只更新过期的）
   ai-toolbox sync-ccswitch         把本机 cc-switch 配置同步到远程（连不上则等待重试）
   ai-toolbox iq-list               列出可用 OpenAI 协议的供应商和模型
   ai-toolbox iq-run <供应商>       用最小运行时测试模型（--model 指定模型）
@@ -595,6 +598,88 @@ function cmdRepairProjects(opts) {
   return { command: "repair-projects", ...result };
 }
 
+async function cmdRemoteVersions(opts) {
+  const { log } = opts;
+  const [rows, latest] = await Promise.all([
+    probeRemotes(),
+    opts.latest ? latestVersions() : Promise.resolve(null),
+  ]);
+  const planned = latest ? planUpdates(rows, latest) : rows;
+  if (!opts.json) {
+    if (latest) {
+      log(`\n远端版本（最新：codex ${latest.codex ?? "?"} · cc-switch-cli ${latest.ccswitch ?? "?"}）`);
+      for (const [tool, err] of Object.entries(latest.errors ?? {})) if (err) log(`  ⚠️ ${tool} 版本查询失败: ${err}`);
+    } else {
+      log("\n远端版本");
+    }
+    for (const row of planned) {
+      if (!row.ok) {
+        log(`  ❌ ${row.label.padEnd(8)} ${row.error}`);
+        continue;
+      }
+      const codex = row.codex
+        ? `${row.codex}${row.codexUpdate ? ` → ${latest.codex}` : ""}`
+        : "(无)";
+      const cc = row.ccswitch
+        ? `${row.ccswitch}${row.ccswitchUpdate ? ` → ${latest.ccswitch}` : ""}`
+        : "(无)";
+      const outdated = row.codexUpdate || row.ccswitchUpdate;
+      log(`  ${outdated ? "↑" : "✔"} ${row.label.padEnd(8)} ${String(row.hostname ?? row.host).padEnd(20)} codex ${codex.padEnd(24)} cc-switch ${cc}`);
+    }
+    if (latest && planned.some((row) => row.codexUpdate || row.ccswitchUpdate)) {
+      log("\n有更新可装：ai-toolbox remote-update");
+    }
+  }
+  return { command: "remote-versions", latest, hosts: planned };
+}
+
+async function cmdRemoteUpdate(opts) {
+  const { log } = opts;
+  const rows = await probeRemotes({ hosts: opts.hosts?.length ? opts.hosts : null });
+  const latest = await latestVersions();
+  const planned = planUpdates(rows, latest);
+  const wanted = (row) =>
+    opts.hosts?.length === 0 || opts.hosts.some((h) => h === row.label || h === row.host);
+  const targets = planned.filter(
+    (row) => row.ok && wanted(row) && (opts.force || row.codexUpdate || row.ccswitchUpdate),
+  );
+  const doCodex = opts.codex;
+  const doCcSwitch = opts.ccswitch;
+
+  if (opts.dryRun) {
+    for (const row of targets) {
+      log(`  [dry-run] ${row.label}: codex ${row.codex ?? "-"} → ${latest.codex ?? "?"}, cc-switch ${row.ccswitch ?? "-"} → ${latest.ccswitch ?? "?"}`);
+    }
+    return { command: "remote-update", dryRun: true, latest, hosts: planned, targets: targets.map((r) => r.label) };
+  }
+
+  const results = [];
+  for (const row of targets) {
+    opts.progress?.(`→ 更新 ${row.label}…`);
+    const result = await updateHost(
+      { host: row.host, label: row.label },
+      {
+        codex: doCodex,
+        ccswitch: doCcSwitch,
+        codexVersion: row.codexUpdate ? latest.codex : null,
+        ccswitchVersion: row.ccswitchUpdate ? latest.ccswitch : null,
+      },
+    );
+    results.push(result);
+    if (!opts.json) {
+      if (!result.ok) {
+        log(`  ❌ ${row.label}: ${result.error ?? "更新失败"}${result.ccswitch?.output ? `（${result.ccswitch.output.slice(-160)}）` : ""}`);
+      } else {
+        const parts = [];
+        if (doCodex) parts.push(`codex ${row.codex ?? "-"} → ${result.codex.after ?? "?"}`);
+        if (doCcSwitch) parts.push(`cc-switch ${row.ccswitch ?? "-"} → ${result.ccswitch.after ?? "?"}`);
+        log(`  ✔ ${row.label}: ${parts.join(" · ")}`);
+      }
+    }
+  }
+  return { command: "remote-update", latest, hosts: planned, results };
+}
+
 async function cmdSyncRemote(opts) {
   const remote = await syncRemotes({ dryRun: opts.dryRun, log: opts.log });
   return { command: "sync-remote", remote };
@@ -896,6 +981,9 @@ async function main() {
       "no-reload": { type: "boolean", default: false },
       "no-remote": { type: "boolean", default: false },
       "no-model-probe": { type: "boolean", default: false },
+      "no-latest": { type: "boolean", default: false },
+      codex: { type: "boolean", default: false },
+      ccswitch: { type: "boolean", default: false },
       timeout: { type: "string" },
       "dry-run": { type: "boolean", default: false },
       "with-secrets": { type: "boolean", default: false },
@@ -925,6 +1013,9 @@ async function main() {
     reload: !values["no-reload"],
     remote: !values["no-remote"],
     modelProbe: !values["no-model-probe"],
+    latest: !values["no-latest"],
+    codex: values.codex || !values.ccswitch,
+    ccswitch: values.ccswitch || !values.codex,
     timeoutMs: values.timeout ? Math.max(10, Number(values.timeout)) * 1000 : 120000,
     setPhase: (name) => {
       currentPhase = name;
@@ -991,6 +1082,12 @@ async function main() {
       break;
     case "sync-remote":
       result = await cmdSyncRemote(opts);
+      break;
+    case "remote-versions":
+      result = await cmdRemoteVersions(opts);
+      break;
+    case "remote-update":
+      result = await cmdRemoteUpdate(opts);
       break;
     case "remote-status":
       result = await cmdRemoteStatus(opts);
