@@ -92,7 +92,7 @@ ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔
 ai-toolbox repair-projects         # 把被寄存的项目/会话归属恢复到 Codex（Codex 需退出）
 ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
 ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
-ai-toolbox remote-versions         # 检查远端 Codex / cc-switch CLI 版本是否有更新
+ai-toolbox remote-versions         # 检查远端 Codex / cc-switch / Claude Code 版本
 ai-toolbox remote-update           # 把远端更新到最新（默认只更新过时的；--dry-run 预览）
 ai-toolbox iq-list                 # 列出可用于智商测试的供应商
 ai-toolbox go-quota                # 查询 OpenCode Go 三窗口额度
@@ -234,21 +234,24 @@ Claude Desktop 走的是 Claude-3p 的 `configLibrary` 配置（不是 settings.
 
 ## 远端版本检查 / 更新
 
-远端机器上的两套东西各走各的更新渠道：
+远端机器上的三套东西各走各的更新渠道：
 
 | 组件 | 来源 | 更新方式 |
 | --- | --- | --- |
 | Codex CLI | npm 全局包 `@openai/codex` | `npm install -g @openai/codex@<latest>` |
 | cc-switch CLI | `saladday/cc-switch-cli` | `cc-switch update` |
+| Claude Code | npm 全局包 `@anthropic-ai/claude-code` | `npm install -g @anthropic-ai/claude-code@<latest>` |
 
 ```bash
 ai-toolbox remote-versions          # 表格：每台机器的版本、是否落后
 ai-toolbox remote-update --dry-run  # 只预览要更新什么
 ai-toolbox remote-update            # 只更新落后的；--host 231 可限定机器
 ai-toolbox remote-update --ccswitch # 只更新 cc-switch；--codex 只更新 codex
+ai-toolbox remote-update --no-claude # 跳过 Claude Code
 ```
 
-桌面 App 菜单栏「cc-switch」分组里也有「检查远端版本…」。
+桌面 App 的「cc-switch」页有「检查远端版本」和「更新远端」两个按钮；
+菜单栏「cc-switch」分组里也有「检查远端版本…」。
 
 ## 自动跟随不会连环重启
 

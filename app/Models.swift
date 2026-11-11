@@ -233,6 +233,7 @@ struct ClaudeSyncRemoteResult: Codable {
 struct LatestRemoteVersions: Codable {
     let codex: String?
     let ccswitch: String?
+    let claude: String?
 }
 
 struct RemoteVersionInfo: Codable {
@@ -242,8 +243,10 @@ struct RemoteVersionInfo: Codable {
     let hostname: String?
     let codex: String?
     let ccswitch: String?
+    let claude: String?
     let codexUpdate: Bool?
     let ccswitchUpdate: Bool?
+    let claudeUpdate: Bool?
     let error: String?
 }
 
@@ -251,6 +254,30 @@ struct LocalAppsInfo: Codable {
     let codexApp: String?
     let codexCli: String?
     let ccSwitchApp: String?
+    let claudeCli: String?
+}
+
+struct RemoteToolUpdate: Codable {
+    let after: String?
+    let exitCode: Int?
+    let output: String?
+}
+
+struct RemoteUpdateHost: Codable {
+    let ok: Bool?
+    let label: String?
+    let host: String?
+    let codex: RemoteToolUpdate?
+    let ccswitch: RemoteToolUpdate?
+    let claude: RemoteToolUpdate?
+    let error: String?
+}
+
+struct RemoteUpdateResult: Codable {
+    let ok: Bool
+    let error: String?
+    let latest: LatestRemoteVersions?
+    let results: [RemoteUpdateHost]?
 }
 
 struct RemoteVersionsResult: Codable {

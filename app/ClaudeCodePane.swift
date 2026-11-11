@@ -30,7 +30,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
     private let headerLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "读取中…")
     private let table = NSTableView()
-    private let scroll = NSScrollView()
+    private let scroll = ProviderScrollView()
     private let status = StatusLine()
     private let spinner = NSProgressIndicator()
     private let refreshButton = NSButton(title: "刷新", target: nil, action: nil)
@@ -50,20 +50,33 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
 
     private func build() {
         headerLabel.stringValue = titleText
-        headerLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        detailLabel.font = .systemFont(ofSize: 12)
+        headerLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        detailLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingMiddle
         detailLabel.maximumNumberOfLines = 2
+
+        let caption = NSTextField(labelWithString: "当前供应商")
+        caption.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        caption.textColor = .tertiaryLabelColor
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        refreshButton.bezelStyle = .rounded
+        refreshButton.bezelStyle = .inline
+        refreshButton.isBordered = false
+        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "刷新")
+        refreshButton.imagePosition = .imageOnly
+        refreshButton.contentTintColor = .secondaryLabelColor
+        refreshButton.toolTip = "刷新列表"
         refreshButton.target = self
         refreshButton.action = #selector(refreshNow)
+
         syncButton.bezelStyle = .rounded
+        syncButton.image = NSImage(systemSymbolName: "icloud.and.arrow.up", accessibilityDescription: "同步到远端")
+        syncButton.imagePosition = .imageLeading
+        syncButton.bezelColor = .controlAccentColor
         syncButton.target = self
         syncButton.action = #selector(syncRemotesNow)
         syncButton.isHidden = mode != .code
@@ -77,13 +90,14 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         autoSyncCheck.state = autoSyncOn ? .on : .off
 
         table.headerView = nil
-        table.rowHeight = 44
+        table.rowHeight = 52
         table.selectionHighlightStyle = .none
         table.backgroundColor = .clear
         table.intercellSpacing = NSSize(width: 0, height: 0)
         table.style = .plain
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("claude"))
         column.resizingMask = .autoresizingMask
+        column.width = 100
         table.addTableColumn(column)
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.dataSource = self
@@ -94,19 +108,26 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
+        scroll.contentView.drawsBackground = false
         scroll.scrollerStyle = .overlay
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.heightAnchor.constraint(equalToConstant: 236).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 284).isActive = true
 
-        let headerRow = NSStackView(views: [headerLabel, spacer(), spinner, autoSyncCheck, syncButton, refreshButton])
+        let titleColumn = NSStackView(views: [caption, headerLabel, detailLabel])
+        titleColumn.orientation = .vertical
+        titleColumn.alignment = .leading
+        titleColumn.spacing = 2
+        titleColumn.setCustomSpacing(10, after: headerLabel)
+
+        let headerRow = NSStackView(views: [titleColumn, spacer(), spinner, autoSyncCheck, syncButton, refreshButton])
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
-        headerRow.spacing = 8
+        headerRow.spacing = 10
 
         let group = GroupBox()
         group.addRow(scroll)
 
-        let stack = NSStackView(views: [headerRow, detailLabel, group, status])
+        let stack = NSStackView(views: [headerRow, group, status])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -118,7 +139,6 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             headerRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            detailLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             group.widthAnchor.constraint(equalTo: stack.widthAnchor),
             status.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
@@ -243,7 +263,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         if mode == .code { envFingerprint = settingsFingerprint() }
         self.detailLabel.stringValue = rows.isEmpty ? "cc-switch 里还没有对应供应商" : detail
         if let current = rows.first(where: { $0.id == currentId }) {
-            self.headerLabel.stringValue = "当前：\(current.name)"
+            self.headerLabel.stringValue = current.name
         } else {
             self.headerLabel.stringValue = titleText
         }
@@ -338,6 +358,14 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        let view = ProviderRowView()
+        view.showTopSeparator = row > 0
+        return view
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { 52 }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < rows.count else { return nil }
         let item = rows[row]
@@ -352,28 +380,40 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         dot.heightAnchor.constraint(equalToConstant: 8).isActive = true
 
         let name = NSTextField(labelWithString: item.name)
-        name.font = .systemFont(ofSize: 13, weight: isCurrent ? .semibold : .regular)
+        name.font = .systemFont(ofSize: 13.5, weight: isCurrent ? .semibold : .regular)
         name.lineBreakMode = .byTruncatingTail
 
         var parts: [String] = []
         if let host = item.host, !host.isEmpty { parts.append(host) }
-        if let model = item.model, !model.isEmpty { parts.append("model \(model)") }
-        if let note = item.note { parts.append(note) }
-        let detail = NSTextField(labelWithString: parts.isEmpty ? "-" : parts.joined(separator: "   "))
-        detail.font = .systemFont(ofSize: 11)
+        if let model = item.model, !model.isEmpty { parts.append(model) }
+        let detail = NSTextField(labelWithString: parts.isEmpty ? "-" : parts.joined(separator: "  ·  "))
+        detail.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         detail.textColor = .secondaryLabelColor
         detail.lineBreakMode = .byTruncatingMiddle
 
         let texts = NSStackView(views: [name, detail])
         texts.orientation = .vertical
         texts.alignment = .leading
-        texts.spacing = 2
+        texts.spacing = 3
+        texts.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let rowStack = NSStackView(views: [dot, texts])
+        var trailing: [NSView] = []
+        if let note = item.note {
+            trailing.append(PageChrome.tag(note, tint: .systemOrange))
+        }
+        if isCurrent {
+            trailing.append(PageChrome.tag("当前", tint: .controlAccentColor))
+        }
+        var rowViews: [NSView] = [dot, texts]
+        if !trailing.isEmpty {
+            rowViews.append(NSView())
+            rowViews.append(contentsOf: trailing)
+        }
+        let rowStack = NSStackView(views: rowViews)
         rowStack.orientation = .horizontal
         rowStack.alignment = .centerY
         rowStack.spacing = 8
-        rowStack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
+        rowStack.edgeInsets = NSEdgeInsets(top: 2, left: 12, bottom: 2, right: 12)
         rowStack.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView()

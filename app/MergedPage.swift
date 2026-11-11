@@ -77,14 +77,18 @@ final class MergedPageController: NSObject {
     private func makeRoot(title: String, subtitle: String) -> NSView {
         let host = NSView()
         host.wantsLayer = true
-        host.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        host.layer?.backgroundColor = Chrome.pageBackground.cgColor
 
         let heading = NSTextField(labelWithString: title)
-        heading.font = .systemFont(ofSize: 22, weight: .semibold)
+        heading.font = .systemFont(ofSize: 24, weight: .bold)
         let detail = MergedSubtitleLabel(wrappingLabelWithString: subtitle)
-        detail.font = .systemFont(ofSize: 12)
+        detail.font = .systemFont(ofSize: 12.5)
         detail.textColor = .secondaryLabelColor
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
 
         segmented.segmentStyle = .rounded
         segmented.trackingMode = .selectOne
@@ -97,18 +101,21 @@ final class MergedPageController: NSObject {
         segmented.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         segmented.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
-        let header = NSStackView(views: [heading, detail, segmented])
+        let header = NSStackView(views: [heading, detail, divider, segmented])
         header.orientation = .vertical
         header.alignment = .leading
-        header.spacing = 4
-        header.setCustomSpacing(12, after: detail)
+        header.spacing = 0
+        header.setCustomSpacing(5, after: heading)
+        header.setCustomSpacing(18, after: detail)
+        header.setCustomSpacing(12, after: divider)
         header.translatesAutoresizingMaskIntoConstraints = false
+        divider.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
 
         contentHost.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(header)
         host.addSubview(contentHost)
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: host.topAnchor, constant: 24),
+            header.topAnchor.constraint(equalTo: host.topAnchor, constant: 26),
             header.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 28),
             header.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -28),
             segmented.widthAnchor.constraint(lessThanOrEqualTo: header.widthAnchor),

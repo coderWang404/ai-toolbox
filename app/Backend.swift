@@ -363,6 +363,11 @@ final class Backend {
         try decode(RemoteVersionsResult.self, from: run(["remote-versions"], timeout: 180))
     }
 
+    /// 更新远端 Codex / cc-switch / Claude Code；可能要装很久。
+    func remoteUpdate() throws -> RemoteUpdateResult {
+        try decode(RemoteUpdateResult.self, from: run(["remote-update"], timeout: 1800))
+    }
+
     /// 查看 Codex 项目状态是否被账号隔离寄存。
     func projectState() throws -> ProjectStateReport {
         try decode(ProjectStateReport.self, from: run(["project-state"], timeout: 30))

@@ -165,6 +165,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let providerScroll = makeTableScroll(tableView)
         providerTableHeight = providerScroll.heightAnchor.constraint(equalToConstant: 176)
         providerTableHeight.isActive = true
+        let providerGroup = GroupBox()
+        providerGroup.addRow(providerScroll)
 
         reloadButton = NSButton(title: "重新加载", target: self, action: #selector(reloadNow))
         reloadButton.bezelStyle = .rounded
@@ -233,7 +235,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
         let codexBody = NSStackView(views: [
             SectionView(title: "当前供应商", content: currentGroup, footer: nil),
-            SectionView(title: "供应商", content: providerScroll),
+            SectionView(title: "供应商", content: providerGroup),
             SectionView(title: "自动跟随", content: followGroup),
             SectionView(title: "远程机器", content: remoteGroup),
             SectionView(title: "通用", content: generalGroup),
@@ -255,6 +257,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let versionsButton = NSButton(title: "检查远端版本", target: self, action: #selector(checkRemoteVersionsNow))
         versionsButton.bezelStyle = .rounded
         versionsButton.controlSize = .regular
+        let updateButton = NSButton(title: "更新远端", target: self, action: #selector(updateRemoteVersionsNow))
+        updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .regular
         ccRows = NSStackView()
         ccRows.orientation = .vertical
         ccRows.alignment = .leading
@@ -272,7 +277,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         ])
         let syncRow = SettingRow(title: "实时同步", subtitle: "以本机配置为准，连上后先检查再更新", accessory: ccSyncSwitch)
         let syncGroup = GroupBox()
-        syncGroup.addRow(NSStackView(views: [syncRow, versionsButton, flexibleSpace(), checkButton]))
+        syncGroup.addRow(NSStackView(views: [syncRow, versionsButton, updateButton, flexibleSpace(), checkButton]))
         let ccBody = NSStackView(views: [
             SectionView(title: "同步", content: syncGroup),
             SectionView(title: "远程机器", content: ccGroup),
@@ -473,6 +478,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         claudeDesktopPage = wrapPage("Claude Desktop", "跟随 cc-switch 切换 Claude Desktop 供应商（写 Claude-3p 配置并重启应用）", claudeDesktopPane)
         ccPane = wrapPage("cc-switch 同步", "以本机 cc-switch 为准，同步到远程机器", ccPane)
 
+        claudeCodePane?.startWatching()
         sidebar = SettingsSidebarController()
         sidebar.onSelect = { [weak self] page in self?.selectPage(page) }
         let content = NSViewController()
@@ -533,13 +539,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private func makeProviderTable(action: Selector) -> NSTableView {
         let table = NSTableView()
         table.headerView = nil
-        table.rowHeight = 44
+        table.rowHeight = 52
         table.selectionHighlightStyle = .none
         table.backgroundColor = .clear
         table.intercellSpacing = NSSize(width: 0, height: 0)
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("main"))
         column.resizingMask = .autoresizingMask
-        column.width = 480
+        column.width = 100
         table.addTableColumn(column)
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.dataSource = self
@@ -551,10 +557,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     private func makeTableScroll(_ table: NSTableView) -> NSScrollView {
-        let scroll = NSScrollView()
+        let scroll = ProviderScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
         scroll.drawsBackground = false
+        scroll.contentView.drawsBackground = false
         scroll.scrollerStyle = .overlay
         scroll.translatesAutoresizingMaskIntoConstraints = false
         return scroll
@@ -842,11 +851,13 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        nil
+        let view = ProviderRowView()
+        view.showTopSeparator = row > 0
+        return view
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        46
+        52
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -854,32 +865,33 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let isCurrent = provider.id == currentId
 
         let name = NSTextField(labelWithString: provider.name)
-        name.font = .systemFont(ofSize: 13, weight: isCurrent ? .medium : .regular)
+        name.font = .systemFont(ofSize: 13.5, weight: isCurrent ? .semibold : .regular)
         name.lineBreakMode = .byTruncatingTail
 
-        let model = NSTextField(labelWithString: [
-            provider.model,
+        let pieces = [
             provider.host,
-            provider.catalogCount > 0 ? "目录\(provider.catalogCount)" : nil,
-        ].compactMap { $0 }.joined(separator: " · "))
-        model.font = .systemFont(ofSize: 12)
-        model.textColor = .secondaryLabelColor
+            provider.model,
+            provider.catalogCount > 0 ? "目录 \(provider.catalogCount)" : nil,
+        ].compactMap { $0 }
+        let detail = NSTextField(labelWithString: pieces.joined(separator: "  ·  "))
+        detail.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingMiddle
 
-        let textStack = NSStackView(views: [name, model])
+        let textStack = NSStackView(views: [name, detail])
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 1
+        textStack.spacing = 3
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        var leading: [NSView] = []
         let dot = NSView()
         dot.wantsLayer = true
-        dot.layer?.cornerRadius = 4
+        dot.layer?.cornerRadius = 3.5
         dot.layer?.backgroundColor = (isCurrent ? NSColor.systemGreen : NSColor.clear).cgColor
         dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.widthAnchor.constraint(equalToConstant: 8).isActive = true
-        dot.heightAnchor.constraint(equalToConstant: 8).isActive = true
-        leading.append(dot)
+        dot.widthAnchor.constraint(equalToConstant: 7).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 7).isActive = true
+
         var trailing: [NSView] = []
         if let token = provider.token, !token.isEmpty {
             trailing.append(CopyableSecret(text: token))
@@ -887,12 +899,15 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         if provider.official {
             trailing.append(PageChrome.pill("官方"))
         }
+        if isCurrent {
+            trailing.append(PageChrome.tag("当前", tint: .controlAccentColor))
+        }
 
-        let rowStack = NSStackView(views: leading + [textStack, flexibleSpace()] + trailing)
+        let rowStack = NSStackView(views: [dot, textStack, flexibleSpace()] + trailing)
         rowStack.orientation = .horizontal
         rowStack.alignment = .centerY
-        rowStack.spacing = 8
-        rowStack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
+        rowStack.spacing = 9
+        rowStack.edgeInsets = NSEdgeInsets(top: 2, left: 12, bottom: 2, right: 12)
         rowStack.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView()
@@ -904,7 +919,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             rowStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         if !provider.hasConfig || provider.official {
-            container.alphaValue = 0.5
+            container.alphaValue = 0.55
         }
         return container
     }
@@ -1186,7 +1201,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                 var lines: [String] = []
                 if let local = result.local {
                     lines.append(
-                        "本机：ChatGPT.app \(local.codexApp ?? "未安装")（codex \(local.codexCli ?? "-")）· CC Switch \(local.ccSwitchApp ?? "未安装")"
+                        "本机：ChatGPT.app \(local.codexApp ?? "未安装")（codex \(local.codexCli ?? "-")）· CC Switch \(local.ccSwitchApp ?? "未安装") · Claude Code \(local.claudeCli ?? "未安装")"
                     )
                 }
                 for row in result.hosts ?? [] {
@@ -1196,7 +1211,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     }
                     let codex = row.codex.map { "\($0)\(row.codexUpdate == true ? " → \(result.latest?.codex ?? "?")" : "")" } ?? "(无)"
                     let cc = row.ccswitch.map { "\($0)\(row.ccswitchUpdate == true ? " → \(result.latest?.ccswitch ?? "?")" : "")" } ?? "(无)"
-                    lines.append("\(row.label ?? "")（\(row.hostname ?? "")）  codex \(codex) · cc-switch \(cc)")
+                    let claude = row.claude.map { "\($0)\(row.claudeUpdate == true ? " → \(result.latest?.claude ?? "?")" : "")" } ?? "(无)"
+                    lines.append("\(row.label ?? "")（\(row.hostname ?? "")）  codex \(codex) · cc-switch \(cc) · claude \(claude)")
                 }
                 DispatchQueue.main.async {
                     let alert = NSAlert()
@@ -1209,6 +1225,43 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                 }
             } catch {
                 DispatchQueue.main.async { self.setStatus("版本检查失败：\(error.localizedDescription)") }
+            }
+        }
+    }
+
+    @objc private func updateRemoteVersionsNow() {
+        let confirm = NSAlert()
+        confirm.messageText = "更新远端组件？"
+        confirm.informativeText = "会把所有在线远端的 Codex、cc-switch CLI、Claude Code 升到最新版。可能几分钟，期间不要关掉这个窗口。"
+        confirm.addButton(withTitle: "开始更新")
+        confirm.addButton(withTitle: "取消")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        setStatus("正在更新远端组件…")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.backend.remoteUpdate()
+                let lines = (result.results ?? []).map { item -> String in
+                    if item.ok == false {
+                        let detail = item.error ?? item.claude?.output.map { String($0.suffix(120)) } ?? "更新失败"
+                        return "❌ \(item.label ?? item.host ?? "")：\(detail)"
+                    }
+                    var parts: [String] = []
+                    if let after = item.codex?.after { parts.append("codex → \(after)") }
+                    if let after = item.ccswitch?.after { parts.append("cc-switch → \(after)") }
+                    if let after = item.claude?.after { parts.append("claude → \(after)") }
+                    return "✔ \(item.label ?? "")：\(parts.joined(separator: " · "))"
+                }
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "远端更新完成"
+                    alert.informativeText = lines.isEmpty ? "没有需要更新的主机" : lines.joined(separator: "\n")
+                    alert.addButton(withTitle: "好")
+                    alert.runModal()
+                    self.setStatus("远端更新完成")
+                }
+            } catch {
+                DispatchQueue.main.async { self.setStatus("远端更新失败：\(error.localizedDescription)") }
             }
         }
     }
@@ -1920,7 +1973,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     private func tableHeight(_ table: NSTableView?, rows: Int) -> CGFloat {
-        guard let table, rows > 0 else { return 44 }
+        guard let table, rows > 0 else { return 52 }
         var total: CGFloat = 0
         for row in 0..<rows {
             total += self.tableView(table, heightOfRow: row)
@@ -2367,21 +2420,6 @@ final class CardView: NSView {
 
     override func updateLayer() {
         layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-    }
-}
-
-final class ProviderRowView: NSTableRowView {
-    var active = false
-
-    override func drawSelection(in dirtyRect: NSRect) {}
-
-    override func draw(_ dirtyRect: NSRect) {
-        if active {
-            NSColor.controlAccentColor.withAlphaComponent(0.14).setFill()
-            let rect = bounds.insetBy(dx: 4, dy: 2)
-            NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
-        }
-        super.draw(dirtyRect)
     }
 }
 

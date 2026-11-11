@@ -1,8 +1,9 @@
-// 远端 Codex / cc-switch 版本检测与更新。
+// 远端 Codex / cc-switch / Claude Code 版本检测与更新。
 //
-// 远端装的是两套东西：
+// 远端装的是三套东西：
 //   - Codex CLI：npm 全局包 @openai/codex，用 `npm i -g` 升级
 //   - cc-switch CLI：saladday/cc-switch-cli（Rust，`cc-switch update` 自更新）
+//   - Claude Code：npm 全局包 @anthropic-ai/claude-code，用 `npm i -g` 升级
 // 本机 GUI 的 CC Switch 是另一个项目（farion1231/cc-switch），不在这里管。
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -13,6 +14,7 @@ import { sshArgs, loadRemotes } from "./remote-sync.mjs";
 const execFileAsync = promisify(execFile);
 
 const CODEX_REGISTRY = "https://registry.npmjs.org/@openai/codex/latest";
+const CLAUDE_REGISTRY = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const CCSWITCH_RELEASES = "https://api.github.com/repos/saladday/cc-switch-cli/releases/latest";
 const CCSWITCH_APP_RELEASES = "https://api.github.com/repos/farion1231/cc-switch/releases/latest";
 const MARKER = "AI_TOOLBOX_REMOTE_JSON:";
@@ -26,6 +28,11 @@ export function parseCodexVersion(text) {
 
 /** "cc-switch 5.10.5" / "5.10.5" → "5.10.5" */
 export function parseCcSwitchVersion(text) {
+  return parseCodexVersion(text);
+}
+
+/** "2.1.322 (Claude Code)" / "2.1.322" → "2.1.322" */
+export function parseClaudeVersion(text) {
   return parseCodexVersion(text);
 }
 
@@ -68,12 +75,14 @@ def sh(cmd):
         return ""
 codex = sh("command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null | head -1 || true")
 ccswitch = sh("command -v cc-switch >/dev/null 2>&1 && cc-switch --version 2>/dev/null | head -1 || true")
-print("${MARKER}" + json.dumps({"hostname": platform.node(), "codex": codex, "ccswitch": ccswitch}))
+claude = sh("command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null | head -1 || true")
+print("${MARKER}" + json.dumps({"hostname": platform.node(), "codex": codex, "ccswitch": ccswitch, "claude": claude}))
 `;
 }
 
-function updateProgram({ codex, ccswitch, codexVersion, ccswitchVersion }) {
+function updateProgram({ codex, ccswitch, claude, codexVersion, ccswitchVersion, claudeVersion }) {
   const codexTarget = codexVersion ? `@${codexVersion}` : "@latest";
+  const claudeTarget = claudeVersion ? `@${claudeVersion}` : "@latest";
   const ccswitchArgs = ccswitchVersion ? ` --version v${String(ccswitchVersion).replace(/^v/, "")}` : "";
   return `
 import json, subprocess
@@ -97,9 +106,15 @@ ${
     ? `result["ccswitch"] = sh("cc-switch update${ccswitchArgs}")`
     : ""
 }
+${
+  claude
+    ? `result["claude"] = sh("npm install -g @anthropic-ai/claude-code${claudeTarget}")`
+    : ""
+}
 result["after"] = {
     "codex": sh("command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null | head -1 || true", 30)["out"],
     "ccswitch": sh("command -v cc-switch >/dev/null 2>&1 && cc-switch --version 2>/dev/null | head -1 || true", 30)["out"],
+    "claude": sh("command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null | head -1 || true", 30)["out"],
 }
 print("${MARKER}" + json.dumps(result))
 `;
@@ -131,7 +146,8 @@ export async function probeHost(entry) {
       hostname: data.hostname ?? null,
       codex: parseCodexVersion(data.codex),
       ccswitch: parseCcSwitchVersion(data.ccswitch),
-      raw: { codex: data.codex || null, ccswitch: data.ccswitch || null },
+      claude: parseClaudeVersion(data.claude),
+      raw: { codex: data.codex || null, ccswitch: data.ccswitch || null, claude: data.claude || null },
       ms: Date.now() - started,
     };
   } catch (err) {
@@ -142,6 +158,7 @@ export async function probeHost(entry) {
       hostname: null,
       codex: null,
       ccswitch: null,
+      claude: null,
       error: String(err?.stderr || err?.message || err).trim().split("\n").slice(-2).join(" ").slice(0, 200),
       ms: Date.now() - started,
     };
@@ -171,6 +188,7 @@ export function localApplications() {
   const codexAppPath = "/Applications/ChatGPT.app";
   const ccSwitchAppPath = "/Applications/CC Switch.app";
   let codexCli = null;
+  let claudeCli = null;
   try {
     const out = execFileSync("bash", ["-lc", "command -v codex >/dev/null 2>&1 && codex --version 2>/dev/null | head -1"], {
       encoding: "utf8",
@@ -180,10 +198,20 @@ export function localApplications() {
   } catch {
     codexCli = null;
   }
+  try {
+    const out = execFileSync("bash", ["-lc", "command -v claude >/dev/null 2>&1 && claude --version 2>/dev/null | head -1"], {
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    claudeCli = parseClaudeVersion(out);
+  } catch {
+    claudeCli = null;
+  }
   return {
     codexApp: readAppVersion(codexAppPath),
     codexAppPath: existsSync(codexAppPath) ? codexAppPath : null,
     codexCli,
+    claudeCli,
     ccSwitchApp: readAppVersion(ccSwitchAppPath),
     ccSwitchAppPath: existsSync(ccSwitchAppPath) ? ccSwitchAppPath : null,
   };
@@ -199,19 +227,22 @@ export async function latestVersions({ fetchImpl = fetch } = {}) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
   };
-  const [codex, ccswitch, ccSwitchApp] = await Promise.allSettled([
+  const [codex, ccswitch, ccSwitchApp, claude] = await Promise.allSettled([
     get(CODEX_REGISTRY).then((data) => data?.version ?? null),
     get(CCSWITCH_RELEASES).then((data) => parseCodexVersion(data?.tag_name ?? null)),
     get(CCSWITCH_APP_RELEASES).then((data) => parseCodexVersion(data?.tag_name ?? null)),
+    get(CLAUDE_REGISTRY).then((data) => data?.version ?? null),
   ]);
   return {
     codex: codex.status === "fulfilled" ? codex.value : null,
     ccswitch: ccswitch.status === "fulfilled" ? ccswitch.value : null,
     ccSwitchApp: ccSwitchApp.status === "fulfilled" ? ccSwitchApp.value : null,
+    claude: claude.status === "fulfilled" ? claude.value : null,
     errors: {
       codex: codex.status === "rejected" ? String(codex.reason?.message ?? codex.reason) : null,
       ccswitch: ccswitch.status === "rejected" ? String(ccswitch.reason?.message ?? ccswitch.reason) : null,
       ccSwitchApp: ccSwitchApp.status === "rejected" ? String(ccSwitchApp.reason?.message ?? ccSwitchApp.reason) : null,
+      claude: claude.status === "rejected" ? String(claude.reason?.message ?? claude.reason) : null,
     },
   };
 }
@@ -223,23 +254,27 @@ export function planUpdates(rows, latest) {
     // 没装（null）也视为需要安装
     codexUpdate: row.ok && (row.codex ? isOutdated(row.codex, latest?.codex) : Boolean(latest?.codex)),
     ccswitchUpdate: row.ok && (row.ccswitch ? isOutdated(row.ccswitch, latest?.ccswitch) : Boolean(latest?.ccswitch)),
+    claudeUpdate: row.ok && (row.claude ? isOutdated(row.claude, latest?.claude) : Boolean(latest?.claude)),
   }));
 }
 
 /** 更新一台远端；codex 用 npm，cc-switch 用自带 update。 */
-export async function updateHost(entry, { codex = true, ccswitch = true, codexVersion = null, ccswitchVersion = null } = {}) {
+export async function updateHost(
+  entry,
+  { codex = true, ccswitch = true, claude = true, codexVersion = null, ccswitchVersion = null, claudeVersion = null } = {},
+) {
   const started = Date.now();
   try {
     const data = await runRemoteProgram(
       entry,
-      updateProgram({ codex, ccswitch, codexVersion, ccswitchVersion }),
+      updateProgram({ codex, ccswitch, claude, codexVersion, ccswitchVersion, claudeVersion }),
       900000,
     );
     const after = data.after ?? {};
     return {
       host: entry.host,
       label: entry.label,
-      ok: !data.codex?.code && !data.ccswitch?.code,
+      ok: !data.codex?.code && !data.ccswitch?.code && !data.claude?.code,
       codex: {
         before: null,
         after: parseCodexVersion(after.codex),
@@ -251,6 +286,12 @@ export async function updateHost(entry, { codex = true, ccswitch = true, codexVe
         after: parseCcSwitchVersion(after.ccswitch),
         exitCode: data.ccswitch?.code ?? null,
         output: data.ccswitch?.out ?? null,
+      },
+      claude: {
+        before: null,
+        after: parseClaudeVersion(after.claude),
+        exitCode: data.claude?.code ?? null,
+        output: data.claude?.out ?? null,
       },
       ms: Date.now() - started,
     };

@@ -3,8 +3,34 @@ import AppKit
 import WebKit
 
 enum Chrome {
-    static let groupRadius: CGFloat = 10
-    static let pageInset = NSEdgeInsets(top: 52, left: 28, bottom: 28, right: 28)
+    static let groupRadius: CGFloat = 12
+    static let pageInset = NSEdgeInsets(top: 56, left: 32, bottom: 32, right: 32)
+
+    /// 卡片背景：浅色下纯白，深色下比窗口略亮，卡片才立得起来。
+    static var cardBackground: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.155, alpha: 1)
+                : NSColor.white
+        }
+    }
+
+    /// 页面底色：浅色用淡淡的灰，白色卡片才有层次。
+    static var pageBackground: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.095, alpha: 1)
+                : NSColor(calibratedWhite: 0.965, alpha: 1)
+        }
+    }
+
+    static var cardBorder: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor.white.withAlphaComponent(0.09)
+                : NSColor.black.withAlphaComponent(0.07)
+        }
+    }
 }
 
 final class GroupBox: NSView {
@@ -33,10 +59,10 @@ final class GroupBox: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        layer?.borderWidth = dark ? 0.5 : 0
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.backgroundColor = Chrome.cardBackground.cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = Chrome.cardBorder.cgColor
+        layer?.cornerRadius = Chrome.groupRadius
     }
 
     func setRows(_ rows: [NSView]) {
@@ -158,19 +184,24 @@ final class StatusLine: NSView {
     private let icon = NSImageView()
     private let label = NSTextField(wrappingLabelWithString: "")
 
+    private var tone: Tone = .info
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        wantsLayer = true
+        layer?.cornerRadius = 9
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         icon.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 12)
-        label.textColor = .secondaryLabelColor
+        label.textColor = .labelColor
         label.isSelectable = true
-        label.maximumNumberOfLines = 3
+        label.maximumNumberOfLines = 4
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let row = NSStackView(views: [icon, label])
         row.orientation = .horizontal
         row.alignment = .top
-        row.spacing = 6
+        row.spacing = 7
+        row.edgeInsets = NSEdgeInsets(top: 9, left: 11, bottom: 9, right: 11)
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
         NSLayoutConstraint.activate([
@@ -178,9 +209,25 @@ final class StatusLine: NSView {
             row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor),
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.widthAnchor.constraint(equalToConstant: 15),
         ])
         isHidden = true
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        let color: NSColor
+        switch tone {
+        case .success: color = .systemGreen
+        case .warning: color = .systemOrange
+        case .error: color = .systemRed
+        case .info: color = .secondaryLabelColor
+        }
+        layer?.backgroundColor = color.withAlphaComponent(0.10).cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = color.withAlphaComponent(0.20).cgColor
+        layer?.cornerRadius = 9
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -212,6 +259,8 @@ final class StatusLine: NSView {
     private func apply(_ body: String, tone: Tone) {
         isHidden = false
         label.stringValue = body
+        self.tone = tone
+        needsDisplay = true
         let symbol: String
         let color: NSColor
         switch tone {
@@ -393,7 +442,8 @@ final class CopyableSecret: NSView {
         preview.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         preview.textColor = .secondaryLabelColor
         preview.lineBreakMode = .byTruncatingMiddle
-        preview.setContentCompressionResistancePriority(expands ? .defaultLow : .required, for: .horizontal)
+        // 列表里空间不够时要能收缩，否则会顶出胶囊边界、把复制按钮裁掉。
+        preview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         preview.toolTip = masked ? "完整密钥可以点眼睛查看，或直接复制" : "点右侧按钮复制"
 
         styleIcon(revealButton, symbol: "eye", label: "查看完整密钥", action: #selector(reveal))
@@ -636,24 +686,116 @@ func savedKeyRow(title: String, key: String, accessory: NSView) -> NSView {
     return column
 }
 
+/// 小标签：当前供应商、模型名、官方等。
+final class TagView: NSView {
+    init(text: String, tint: NSColor = .secondaryLabelColor, filled: Bool = true) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = filled ? tint.withAlphaComponent(0.13).cgColor : NSColor.clear.cgColor
+        layer?.borderWidth = filled ? 0 : 1
+        layer?.borderColor = tint.withAlphaComponent(0.35).cgColor
+
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 10.5, weight: .medium)
+        label.textColor = tint
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+        ])
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var wantsUpdateLayer: Bool { true }
+}
+
+/// 供应商列表的滚动容器：始终把表格宽度钉在可视区域，避免列宽固定导致右侧被裁。
+final class ProviderScrollView: NSScrollView {
+    override func layout() {
+        super.layout()
+        guard let table = documentView as? NSTableView else { return }
+        let width = contentSize.width
+        guard width > 1, abs(table.frame.width - width) > 0.5 else { return }
+        table.setFrameSize(NSSize(width: width, height: table.frame.height))
+    }
+}
+
+/// 供应商列表的行：悬停高亮 + 行间细线，列表看起来才像一张卡片。
+final class ProviderRowView: NSTableRowView {
+    var showTopSeparator = false {
+        didSet { needsDisplay = true }
+    }
+    private var hovering = false
+
+    override var isFlipped: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        needsDisplay = true
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        if hovering {
+            NSColor.quaternaryLabelColor.withAlphaComponent(0.30).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 2), xRadius: 8, yRadius: 8).fill()
+        }
+        if showTopSeparator {
+            NSColor.separatorColor.withAlphaComponent(0.45).setFill()
+            NSRect(x: 16, y: bounds.height - 1, width: max(0, bounds.width - 32), height: 1).fill()
+        }
+    }
+}
+
 enum PageChrome {
     static func scroll(title: String, subtitle: String, content: NSView) -> NSScrollView {
         let heading = NSTextField(labelWithString: title)
-        heading.font = .systemFont(ofSize: 22, weight: .semibold)
+        heading.font = .systemFont(ofSize: 24, weight: .bold)
+        heading.setContentCompressionResistancePriority(.required, for: .horizontal)
         let detail = NSTextField(wrappingLabelWithString: subtitle)
-        detail.font = .systemFont(ofSize: 12)
+        detail.font = .systemFont(ofSize: 12.5)
         detail.textColor = .secondaryLabelColor
         detail.preferredMaxLayoutWidth = 560
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [heading, detail, content])
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [heading, detail, divider, content])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 24, right: 0)
-        stack.setCustomSpacing(4, after: heading)
-        stack.setCustomSpacing(22, after: detail)
+        stack.spacing = 0
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 28, right: 0)
+        stack.setCustomSpacing(5, after: heading)
+        stack.setCustomSpacing(18, after: detail)
+        stack.setCustomSpacing(22, after: divider)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        return buildScroll(stack: stack, content: content, topInset: 24)
+        divider.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        return buildScroll(stack: stack, content: content, topInset: 26)
     }
 
     /// 合并页里的子页：不画自己的标题，只保留正文和滚动。
@@ -674,7 +816,7 @@ enum PageChrome {
 
         let scroll = NSScrollView()
         scroll.drawsBackground = true
-        scroll.backgroundColor = .windowBackgroundColor
+        scroll.backgroundColor = Chrome.pageBackground
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
@@ -712,14 +854,11 @@ enum PageChrome {
         return button
     }
 
-    static func pill(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 10, weight: .medium)
-        label.textColor = .secondaryLabelColor
-        label.wantsLayer = true
-        label.layer?.cornerRadius = 4
-        label.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.25).cgColor
-        label.alignment = .center
-        return label
+    static func pill(_ title: String, tint: NSColor = .secondaryLabelColor) -> NSView {
+        TagView(text: title, tint: tint, filled: false)
+    }
+
+    static func tag(_ title: String, tint: NSColor = .secondaryLabelColor) -> NSView {
+        TagView(text: title, tint: tint)
     }
 }

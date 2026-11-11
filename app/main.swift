@@ -462,7 +462,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if row.ok == false { return "❌ \(row.label ?? row.host ?? "")：\(row.error ?? "失败")" }
                     let codex = row.codex.map { "\($0)\(row.codexUpdate == true ? " → \(result.latest?.codex ?? "?")" : "")" } ?? "(无)"
                     let cc = row.ccswitch.map { "\($0)\(row.ccswitchUpdate == true ? " → \(result.latest?.ccswitch ?? "?")" : "")" } ?? "(无)"
-                    return "\(row.label ?? "")（\(row.hostname ?? "")）  codex \(codex) · cc-switch \(cc)"
+                    let claude = row.claude.map { "\($0)\(row.claudeUpdate == true ? " → \(result.latest?.claude ?? "?")" : "")" } ?? "(无)"
+                    return "\(row.label ?? "")（\(row.hostname ?? "")）  codex \(codex) · cc-switch \(cc) · claude \(claude)"
                 }
                 DispatchQueue.main.async {
                     let alert = NSAlert()

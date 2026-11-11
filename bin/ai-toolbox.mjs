@@ -88,7 +88,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox watch                 持续监控配置，切换后自动热重启（推荐常驻）
   ai-toolbox sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
   ai-toolbox remote-status         查看远程正在使用的供应商和密钥尾号
-  ai-toolbox remote-versions       检查远端 Codex / cc-switch CLI 版本是否有更新
+  ai-toolbox remote-versions       检查远端 Codex / cc-switch / Claude Code 版本
   ai-toolbox remote-update         把远端 Codex / cc-switch 更新到最新（默认只更新过期的）
   ai-toolbox sync-ccswitch         把本机 cc-switch 配置同步到远程（连不上则等待重试）
   ai-toolbox iq-list               列出可用 OpenAI 协议的供应商和模型
@@ -631,10 +631,10 @@ async function cmdRemoteVersions(opts) {
     log(
       `  ✔ ChatGPT.app ${local.codexApp ?? "未安装"}（codex CLI ${local.codexCli ?? "-"}）   CC Switch ${local.ccSwitchApp ?? "未安装"}${
         latest?.ccSwitchApp ? `（最新 ${latest.ccSwitchApp}）` : ""
-      }`,
+      }   Claude Code ${local.claudeCli ?? "未安装"}${latest?.claude ? `（最新 ${latest.claude}）` : ""}`,
     );
     if (latest) {
-      log(`\n远端（最新：codex ${latest.codex ?? "?"} · cc-switch-cli ${latest.ccswitch ?? "?"}）`);
+      log(`\n远端（最新：codex ${latest.codex ?? "?"} · cc-switch-cli ${latest.ccswitch ?? "?"} · claude ${latest.claude ?? "?"}）`);
       for (const [tool, err] of Object.entries(latest.errors ?? {})) if (err) log(`  ⚠️ ${tool} 版本查询失败: ${err}`);
     } else {
       log("\n远端版本");
@@ -650,10 +650,15 @@ async function cmdRemoteVersions(opts) {
       const cc = row.ccswitch
         ? `${row.ccswitch}${row.ccswitchUpdate ? ` → ${latest.ccswitch}` : ""}`
         : "(无)";
-      const outdated = row.codexUpdate || row.ccswitchUpdate;
-      log(`  ${outdated ? "↑" : "✔"} ${row.label.padEnd(8)} ${String(row.hostname ?? row.host).padEnd(20)} codex ${codex.padEnd(24)} cc-switch ${cc}`);
+      const claude = row.claude
+        ? `${row.claude}${row.claudeUpdate ? ` → ${latest.claude}` : ""}`
+        : "(无)";
+      const outdated = row.codexUpdate || row.ccswitchUpdate || row.claudeUpdate;
+      log(
+        `  ${outdated ? "↑" : "✔"} ${row.label.padEnd(8)} ${String(row.hostname ?? row.host).padEnd(20)} codex ${codex.padEnd(24)} cc-switch ${cc.padEnd(18)} claude ${claude}`,
+      );
     }
-    if (latest && planned.some((row) => row.codexUpdate || row.ccswitchUpdate)) {
+    if (latest && planned.some((row) => row.codexUpdate || row.ccswitchUpdate || row.claudeUpdate)) {
       log("\n有更新可装：ai-toolbox remote-update");
     }
   }
@@ -673,14 +678,17 @@ async function cmdRemoteUpdate(opts) {
   const wanted = (row) =>
     hostList.length === 0 || hostList.some((h) => h === row.label || h === row.host);
   const targets = planned.filter(
-    (row) => row.ok && wanted(row) && (opts.force || row.codexUpdate || row.ccswitchUpdate),
+    (row) => row.ok && wanted(row) && (opts.force || row.codexUpdate || row.ccswitchUpdate || row.claudeUpdate),
   );
   const doCodex = opts.codex;
   const doCcSwitch = opts.ccswitch;
+  const doClaude = opts.claude !== false;
 
   if (opts.dryRun) {
     for (const row of targets) {
-      log(`  [dry-run] ${row.label}: codex ${row.codex ?? "-"} → ${latest.codex ?? "?"}, cc-switch ${row.ccswitch ?? "-"} → ${latest.ccswitch ?? "?"}`);
+      log(
+        `  [dry-run] ${row.label}: codex ${row.codex ?? "-"} → ${latest.codex ?? "?"}, cc-switch ${row.ccswitch ?? "-"} → ${latest.ccswitch ?? "?"}, claude ${row.claude ?? "-"} → ${latest.claude ?? "?"}`,
+      );
     }
     return { command: "remote-update", dryRun: true, latest, hosts: planned, targets: targets.map((r) => r.label) };
   }
@@ -693,21 +701,12 @@ async function cmdRemoteUpdate(opts) {
         {
           codex: doCodex,
           ccswitch: doCcSwitch,
+          claude: doClaude,
           codexVersion: row.codexUpdate ? latest.codex : null,
           ccswitchVersion: row.ccswitchUpdate ? latest.ccswitch : null,
+          claudeVersion: row.claudeUpdate ? latest.claude : null,
         },
       );
-      if (!opts.json) {
-        if (!result.ok) {
-          const detail = result.error ?? result.ccswitch?.output?.slice(-160) ?? "更新失败";
-          log(`  ❌ ${row.label}: ${detail}`);
-        } else {
-          const parts = [];
-          if (doCodex) parts.push(`codex ${row.codex ?? "-"} → ${result.codex.after ?? "?"}`);
-          if (doCcSwitch) parts.push(`cc-switch ${row.ccswitch ?? "-"} → ${result.ccswitch.after ?? "?"}`);
-          log(`  ✔ ${row.label}: ${parts.join(" · ")}`);
-        }
-      }
       return result;
     }),
   );
@@ -745,6 +744,24 @@ async function cmdRemoteUpdate(opts) {
         item.result.ok = false;
         if (!opts.json) log(`  ❌ ${item.row.label}: ${item.tool} 直装失败 ${String(err.message).slice(0, 160)}`);
       }
+    }
+  }
+
+  // 直装回退结束后再统一汇报，避免先报 ❌ 又报成功。
+  if (!opts.json) {
+    for (const [index, result] of results.entries()) {
+      const row = targets[index];
+      if (!row) continue;
+      if (!result.ok) {
+        const detail = result.error ?? result.ccswitch?.output?.slice(-160) ?? result.claude?.output?.slice(-160) ?? "更新失败";
+        log(`  ❌ ${row.label}: ${detail}`);
+        continue;
+      }
+      const parts = [];
+      if (doCodex) parts.push(`codex ${row.codex ?? "-"} → ${result.codex.after ?? "?"}`);
+      if (doCcSwitch) parts.push(`cc-switch ${row.ccswitch ?? "-"} → ${result.ccswitch.after ?? "?"}`);
+      if (doClaude) parts.push(`claude ${row.claude ?? "-"} → ${result.claude?.after ?? "?"}`);
+      log(`  ✔ ${row.label}: ${parts.join(" · ")}`);
     }
   }
 
@@ -1164,6 +1181,7 @@ async function main() {
       "no-remote": { type: "boolean", default: false },
       "no-model-probe": { type: "boolean", default: false },
       "no-sync-remote": { type: "boolean", default: false },
+      "no-claude": { type: "boolean", default: false },
       "no-latest": { type: "boolean", default: false },
       "no-download": { type: "boolean", default: false },
       codex: { type: "boolean", default: false },
@@ -1197,6 +1215,7 @@ async function main() {
     reload: !values["no-reload"],
     remote: !values["no-remote"],
     modelProbe: !values["no-model-probe"],
+    claude: !values["no-claude"],
     syncRemoteAfterSwitch: !values["no-sync-remote"],
     latest: !values["no-latest"],
     download: !values["no-download"],
