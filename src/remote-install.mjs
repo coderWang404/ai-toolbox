@@ -1,7 +1,7 @@
 // 远端直装（绕过 GitHub）：远端机器通常访问不了 GitHub，cc-switch 自更新和
 // npm 装 codex 都会失败。这里在本机下载 release 资产，再用 scp 推过去替换。
 import { execFile } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, statSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -38,9 +38,12 @@ async function download(url, target) {
 
 async function extract(archive, member, into) {
   await execFileAsync("tar", ["-xzf", archive, "-C", into], { timeout: 180000 });
-  const extracted = path.join(into, member);
-  if (!existsSync(extracted)) throw new Error(`压缩包里没有 ${member}`);
-  return extracted;
+  const exact = path.join(into, member);
+  if (existsSync(exact)) return exact;
+  // codex 的包名是 codex-x86_64-unknown-linux-musl，按前缀找
+  const found = readdirSync(into).find((name) => name.startsWith(member));
+  if (!found) throw new Error(`压缩包里没有 ${member}`);
+  return path.join(into, found);
 }
 
 function scpArgs(entry, local, remote) {
@@ -96,8 +99,17 @@ for target in targets:
         break
     except Exception as exc:
         errors.append("%s: %s" % (target, exc))
-version = out(name + " --version 2>/dev/null | head -1")
-print(${JSON.stringify(MARKER)} + json.dumps({"installed": installed, "version": version, "errors": errors}))
+installed_version = out((installed or name) + " --version 2>/dev/null | head -1") if installed else ""
+effective_path = out("command -v " + name + " || true")
+effective_version = out(name + " --version 2>/dev/null | head -1") if effective_path else ""
+print(${JSON.stringify(MARKER)} + json.dumps({
+    "installed": installed,
+    "version": installed_version,
+    "effectivePath": effective_path,
+    "effectiveVersion": effective_version,
+    "shadowed": bool(installed and effective_path and os.path.realpath(installed) != os.path.realpath(effective_path)),
+    "errors": errors,
+}))
 `;
 }
 

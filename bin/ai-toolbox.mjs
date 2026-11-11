@@ -643,11 +643,16 @@ async function cmdRemoteVersions(opts) {
 
 async function cmdRemoteUpdate(opts) {
   const { log } = opts;
-  const rows = await probeRemotes({ hosts: opts.hosts?.length ? opts.hosts : null });
+  const hostList = Array.isArray(opts.hosts)
+    ? opts.hosts
+    : typeof opts.hosts === "string" && opts.hosts
+      ? opts.hosts.split(",").map((item) => item.trim()).filter(Boolean)
+      : [];
+  const rows = await probeRemotes();
   const latest = await latestVersions();
   const planned = planUpdates(rows, latest);
   const wanted = (row) =>
-    opts.hosts?.length === 0 || opts.hosts.some((h) => h === row.label || h === row.host);
+    hostList.length === 0 || hostList.some((h) => h === row.label || h === row.host);
   const targets = planned.filter(
     (row) => row.ok && wanted(row) && (opts.force || row.codexUpdate || row.ccswitchUpdate),
   );
@@ -709,10 +714,14 @@ async function cmdRemoteUpdate(opts) {
             ? await installCcSwitchBinary({ host: item.row.host, label: item.row.label, user: item.row.user, port: item.row.port, identityFile: item.row.identityFile }, latest.ccswitch)
             : await installCodexBinary({ host: item.row.host, label: item.row.label, user: item.row.user, port: item.row.port, identityFile: item.row.identityFile }, latest.codex);
         item.result.ok = true;
-        if (item.tool === "ccswitch") item.result.ccswitch = { ...item.result.ccswitch, after: installed.version, installedAt: installed.installed };
-        else item.result.codex = { ...item.result.codex, after: installed.version, installedAt: installed.installed };
+        const after = installed.effectiveVersion || installed.version;
+        const shadowed = installed.shadowed ? `（PATH 里仍是 ${installed.effectivePath}，新版本在 ${installed.installed}）` : "";
+        if (item.tool === "ccswitch") item.result.ccswitch = { ...item.result.ccswitch, after, installedAt: installed.installed, shadowed: Boolean(installed.shadowed) };
+        else item.result.codex = { ...item.result.codex, after, installedAt: installed.installed, shadowed: Boolean(installed.shadowed) };
         item.result.fallback = true;
-        if (!opts.json) log(`  ⤵ ${item.row.label}: ${item.tool} 直装完成 → ${installed.version ?? "?"}（${installed.installed ?? "-"}）`);
+        if (!opts.json) {
+          log(`  ⤵ ${item.row.label}: ${item.tool} 直装完成 → ${after ?? "?"}（${installed.installed ?? "-"}）${shadowed}`);
+        }
       } catch (err) {
         item.result.ok = false;
         if (!opts.json) log(`  ❌ ${item.row.label}: ${item.tool} 直装失败 ${String(err.message).slice(0, 160)}`);
