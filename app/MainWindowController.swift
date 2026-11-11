@@ -48,6 +48,9 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var iqLogHeight: NSLayoutConstraint!
     private var iqRunButton: NSButton!
     private var iqCancelButton: NSButton!
+    private var iqTimerLabel: NSTextField!
+    private var iqTimer: Timer?
+    private var iqStartedAt: Date?
     private var iqPhase = "idle"
     private var iqEmptyLabel: NSTextField!
     private var iqMetaLabel: NSTextField!
@@ -297,6 +300,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         iqTopicPopup.lastItem?.representedObject = "banana"
         iqTopicPopup.addItem(withTitle: "摸糖保证题")
         iqTopicPopup.lastItem?.representedObject = "candy"
+        if let savedTopic = defaults.string(forKey: "iqTopic"),
+           let index = iqTopicPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == savedTopic }) {
+            iqTopicPopup.selectItem(at: index)
+        }
         iqTopicPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
         iqProviderPopup = NSPopUpButton()
         iqModelPopup = NSPopUpButton()
@@ -309,6 +316,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         iqThinkingControl = NSSegmentedControl(labels: ["关闭"], trackingMode: .selectOne, target: nil, action: nil)
         iqThinkingControl.segmentStyle = .rounded
         iqThinkingControl.selectedSegment = 0
+        iqThinkingControl.target = self
+        iqThinkingControl.action = #selector(iqThinkingChanged)
         iqThinkingControl.setContentHuggingPriority(.required, for: .horizontal)
         iqStatusLabel = StatusLine()
         iqRunButton = PageChrome.primaryButton("开始测试", action: #selector(runIqTest), target: self)
@@ -405,8 +414,11 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         iqTarget.addRow(SettingRow(title: "模型", accessory: iqModelPopup))
         iqTarget.addRow(SettingRow(title: "思考强度", accessory: iqThinkingControl))
         let iqTargetSection = SectionView(title: "测试对象", content: iqTarget, footer: "画面题只改工作目录里的 index.html。摸糖保证题只许文字作答，不能联网，也不能读文件。测试过程中可以暂停或取消。")
-        let runRow = NSStackView(views: [flexibleSpace(), iqCancelButton, iqRunButton])
+        iqTimerLabel = makeLabel("", font: .monospacedDigitSystemFont(ofSize: 11, weight: .medium), color: .secondaryLabelColor)
+        iqTimerLabel.isHidden = true
+        let runRow = NSStackView(views: [flexibleSpace(), iqTimerLabel, iqCancelButton, iqRunButton])
         runRow.orientation = .horizontal
+        runRow.spacing = 10
         let resultGroup = NSStackView(views: [iqMetaLabel, logScroll, preview, iqActions])
         resultGroup.orientation = .vertical
         resultGroup.alignment = .leading
@@ -1317,8 +1329,14 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     private func currentIqSelection() -> (key: String, model: String, thinking: String)? {
-        guard let provider = selectedIqProvider() else { return nil }
-        return ("\(provider.appType)/\(provider.id)", iqModelPopup?.titleOfSelectedItem ?? "", selectedIqThinking())
+        if let provider = selectedIqProvider() {
+            return ("\(provider.appType)/\(provider.id)", iqModelPopup?.titleOfSelectedItem ?? "", selectedIqThinking())
+        }
+        // 首次加载：恢复上次用过的供应商/模型/思考强度。
+        if let key = defaults.string(forKey: "iqProvider") {
+            return (key, defaults.string(forKey: "iqModel") ?? "", defaults.string(forKey: "iqThinking") ?? "off")
+        }
+        return nil
     }
 
     private func selectedIqProvider() -> IqProvider? {
@@ -1370,6 +1388,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             iqProviderPopup.select(item)
         }
         fillIqModels(preferred: selected?.model, thinking: selected?.thinking)
+        refreshSidebar()
     }
 
     private func iqAppTypeTitle(_ type: String) -> String {
@@ -1424,10 +1443,30 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     @objc private func iqModelChanged() {
         fillIqThinking(preferred: nil)
+        saveIqSelection()
+        refreshSidebar()
     }
 
     @objc private func iqProviderChanged() {
         fillIqModels(preferred: nil)
+        saveIqSelection()
+        refreshSidebar()
+    }
+
+    @objc private func iqThinkingChanged() {
+        saveIqSelection()
+    }
+
+    private func saveIqSelection() {
+        guard let provider = selectedIqProvider() else { return }
+        defaults.set("\(provider.appType)/\(provider.id)", forKey: "iqProvider")
+        if let model = iqModelPopup?.titleOfSelectedItem, !model.isEmpty {
+            defaults.set(model, forKey: "iqModel")
+        }
+        defaults.set(selectedIqThinking(), forKey: "iqThinking")
+        if let topic = iqTopicPopup?.selectedItem?.representedObject as? String {
+            defaults.set(topic, forKey: "iqTopic")
+        }
     }
 
     @objc private func runIqTest() {
@@ -1448,8 +1487,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let topic = iqTopicPopup.selectedItem?.representedObject as? String ?? "pelican"
         let topicTitle = iqTopicPopup.titleOfSelectedItem ?? "鹈鹕骑自行车"
         guard !model.isEmpty else { return }
+        saveIqSelection()
         setBusy(true, status: nil)
         iqPhase = "running"
+        startIqTimer()
         iqStatusLabel.set("正在测试 \(topicTitle) · \(provider.name) / \(model) · \(thinkingTitle(thinking))…")
         iqLog?.string = ""
         iqReply?.string = ""
@@ -1473,10 +1514,39 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             } catch {
                 DispatchQueue.main.async {
                     self.finishIqRun()
-                    self.iqStatusLabel.set("❌ \(error.localizedDescription)")
+                    let message = error.localizedDescription
+                    if message.contains("没有新进度") || message.contains("超时") {
+                        self.iqStatusLabel.set(
+                            "\(message)。已生成的内容仍保留，可以重试或换更快的模型。",
+                            tone: .warning
+                        )
+                    } else {
+                        self.iqStatusLabel.set("❌ \(message)")
+                    }
                 }
             }
         }
+    }
+
+    private func startIqTimer() {
+        iqStartedAt = Date()
+        iqTimerLabel?.isHidden = false
+        iqTimerLabel?.stringValue = "00:00"
+        iqTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, let started = self.iqStartedAt else { return }
+            let seconds = max(0, Int(Date().timeIntervalSince(started)))
+            self.iqTimerLabel?.stringValue = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        iqTimer = timer
+    }
+
+    private func stopIqTimer() {
+        iqTimer?.invalidate()
+        iqTimer = nil
+        iqStartedAt = nil
+        iqTimerLabel?.isHidden = true
     }
 
     private func handleIqProgress(_ chunk: String) {
@@ -1538,6 +1608,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     private func finishIqRun() {
         iqPhase = "idle"
+        stopIqTimer()
         setBusy(false)
         iqRunButton?.title = "开始测试"
         iqRunButton?.isEnabled = true
@@ -1561,7 +1632,11 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         }
         let thinking = result.thinking.flatMap { $0 == "off" ? nil : thinkingTitle($0) }
         let head = "\(result.topicTitle ?? iqTopicPopup.titleOfSelectedItem ?? "") · \(result.providerName ?? "") / \(result.model ?? "")"
-        iqMetaLabel?.stringValue = thinking == nil ? "\(head) · \(flag)" : "\(head) · \(thinking!) · \(flag)"
+        var parts = [head]
+        if let thinking { parts.append(thinking) }
+        parts.append(flag)
+        if let ms = result.elapsedMs { parts.append("用时 \(Int((Double(ms) / 1000).rounded())) 秒") }
+        iqMetaLabel?.stringValue = parts.joined(separator: " · ")
         if result.stopReason == "cancelled" {
             iqStatusLabel.set("已取消，保留已写出的页面")
         } else {

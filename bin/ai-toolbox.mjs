@@ -128,7 +128,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   --no-reload           只写配置，不重启 Codex
   --no-remote           不同步远程机器（内置机器见 src/remotes.json，自定义见 ~/.ai-toolbox/remotes.json）
   --no-model-probe      不向供应商 /models 拉取模型目录（只用 cc-switch 里配置的目录）
-  --timeout <秒>        单次命令总超时（默认 120，watch / serve 不生效）
+  --timeout <秒>        多久没有进度就停止（默认 120，watch / serve 不生效）
   --dry-run             只展示将写入的配置，不落盘
   --focus / --no-focus  重启后是否把 ChatGPT 窗口切到前台（默认 focus）
   --json                以 JSON 输出（供桌面 App / 脚本调用）
@@ -923,7 +923,12 @@ async function cmdIqRun(query, opts) {
   if (!spec && opts.model) provider.models.push({ id: model, ...resolveThinking(model) });
   const thinking = opts.thinking || spec?.defaultThinking || "off";
   const topic = iqTopic(opts.topic);
-  const progress = (line) => console.error(line);
+  // 走 opts.progress：JSON 模式下写 stderr，同时算一次“还活着”，避免长测试被看门狗误杀。
+  const progress = (line) => {
+    opts.markActivity?.();
+    if (!opts.json && line.startsWith("TICK ")) return;
+    (opts.progress ?? ((text) => console.error(text)))(line);
+  };
   const result = await runIqTest({ provider, model, thinking, topic: topic.id, log: progress });
   opts.log(`\n${provider.name} / ${model}`);
   opts.log(result.htmlPath ? `HTML: ${result.htmlPath}` : "没有生成 HTML");
@@ -1258,20 +1263,31 @@ async function main() {
     return;
   }
 
-  // 长驻命令不设总超时；其余命令超时后明确报出卡在哪个阶段，避免界面一直转圈。
+  // 长驻命令不设超时；其余命令按“多久没有进度”判断，避免把正常但很慢的模型测试杀掉。
   const LONG_RUNNING = new Set(["watch", "today-serve", "grok-serve", "net-speed"]);
+  let lastActivity = Date.now();
+  const markActivity = () => { lastActivity = Date.now(); };
+  opts.markActivity = markActivity;
+  const rawProgress = opts.progress;
+  opts.progress = (line) => { markActivity(); rawProgress?.(line); };
+  const rawLog = opts.log;
+  opts.log = (line) => { markActivity(); rawLog?.(line); };
   if (!LONG_RUNNING.has(command)) {
     currentPhase = command;
-    const watchdog = setTimeout(() => {
-      const message = `命令超时（${Math.round(opts.timeoutMs / 1000)}s），卡在阶段：${currentPhase}`;
+    const idleLimit = opts.timeoutMs;
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastActivity < idleLimit) return;
+      clearInterval(watchdog);
+      const seconds = Math.round(idleLimit / 1000);
+      const message = `命令 ${seconds} 秒没有新进度，已停止；卡在阶段：${currentPhase}`;
       if (json) {
         console.log(JSON.stringify({ ok: false, error: message, phase: currentPhase, timeout: true }));
       } else {
         console.error(`\n❌ ${message}`);
-        console.error(`   config.toml 已按原子写落盘；可运行 ai-toolbox current 查看当前状态，或重试。`);
+        console.error(`   已生成的页面或文件仍保留；可重试，或用 --timeout 放宽。`);
       }
       process.exit(1);
-    }, opts.timeoutMs);
+    }, 1000);
     watchdog.unref?.();
   }
 

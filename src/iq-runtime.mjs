@@ -309,6 +309,10 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
       log(`HTML ${htmlFile}`);
     }
   }, 400);
+  // 每 10 秒报一次心跳：界面可以显示已用时，CLI 看门狗也不会把慢模型误判成卡死。
+  const heartbeat = setInterval(() => {
+    log(`TICK ${Math.round((Date.now() - started) / 1000)}`);
+  }, 10000);
   const control = { paused: false, cancelled: false, wake: null };
   const chosen = iqTopic(topic);
   const task = prompt || iqPrompt(chosen.id);
@@ -420,6 +424,7 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
     }
   } finally {
     clearInterval(watch);
+    clearInterval(heartbeat);
     if (!announced && existsSync(htmlFile)) {
       announced = true;
       log(`HTML ${htmlFile}`);

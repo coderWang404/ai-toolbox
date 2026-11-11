@@ -394,7 +394,7 @@ final class Backend {
     }
 
     func iqRun(_ provider: String, model: String, thinking: String, topic: String, onProgress: @escaping (String) -> Void) throws -> IqRunResult {
-        let data = try runStreaming(["iq-run", provider, "--model", model, "--thinking", thinking, "--topic", topic], timeout: 1000, control: true, onStderr: onProgress)
+        let data = try runStreaming(["iq-run", provider, "--model", model, "--thinking", thinking, "--topic", topic], timeout: 1900, control: true, onStderr: onProgress)
         let result = try decode(IqRunResult.self, from: data)
         if result.ok == false {
             throw BackendError.commandFailed(result.error ?? "测试没有完成")
