@@ -19,6 +19,7 @@ import { localFingerprint } from "../src/ccswitch-snapshot.mjs";
 import { findCodexBinary, readEffectiveConfig } from "../src/verify-client.mjs";
 import { findIqProvider, listIqProviders, publicIqProvider, resolveThinking } from "../src/iq-catalog.mjs";
 import { iqTopic, runIqTest } from "../src/iq-runtime.mjs";
+import { readIqHistory, clearIqHistory } from "../src/iq-history.mjs";
 import { addKeys, applySelectedKey, listKeys, parseKeyText, queryAll, removeKey, setPlan } from "../src/go-quota.mjs";
 import { addKeys as addClineKeys, listKeys as listClineKeys, parseKeyText as parseClineKeyText, queryAll as queryClineQuota, removeKey as removeClineKey } from "../src/cline-quota.mjs";
 import { completeChat, startServer, status as grokStatus } from "../src/grok-bot.mjs";
@@ -93,6 +94,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox sync-ccswitch         把本机 cc-switch 配置同步到远程（连不上则等待重试）
   ai-toolbox iq-list               列出可用 OpenAI 协议的供应商和模型
   ai-toolbox iq-run <供应商>       用最小运行时测试模型（--model 指定模型）
+  ai-toolbox iq-history            查看智商测试历史（--limit N，--clear 清空）
   ai-toolbox go-keys               列出本机保存的 OpenCode Go 密钥（只显示尾号）
   ai-toolbox go-keys-plan <id> <plan> 设置密钥套餐（go|plus）
   ai-toolbox go-keys-use <id>      把这把密钥写入 cc-switch、Kimi Code、OpenCode 和 DeepSeek Harness，不改模型
@@ -926,7 +928,7 @@ async function cmdIqRun(query, opts) {
   // 走 opts.progress：JSON 模式下写 stderr，同时算一次“还活着”，避免长测试被看门狗误杀。
   const progress = (line) => {
     opts.markActivity?.();
-    if (!opts.json && line.startsWith("TICK ")) return;
+    if (!opts.json && (line.startsWith("TICK ") || line.startsWith("TEXT "))) return;
     (opts.progress ?? ((text) => console.error(text)))(line);
   };
   const result = await runIqTest({ provider, model, thinking, topic: topic.id, log: progress });
@@ -934,6 +936,46 @@ async function cmdIqRun(query, opts) {
   opts.log(result.htmlPath ? `HTML: ${result.htmlPath}` : "没有生成 HTML");
   opts.log(`用时 ${Math.round(result.elapsedMs / 1000)} 秒，${result.stopReason}`);
   return { command: "iq-run", ...result, provider: publicIqProvider(provider) };
+}
+
+function formatHistoryTime(iso) {
+  if (!iso) return "-";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(iso).slice(0, 16).replace("T", " ");
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function cmdIqHistory(opts) {
+  if (opts.clear) {
+    clearIqHistory();
+    if (!opts.json) opts.log("已清空智商测试历史");
+    return { command: "iq-history", cleared: true, entries: [] };
+  }
+  const limit = Math.min(100, Math.max(1, Number(opts.limit) || 20));
+  const entries = readIqHistory(limit);
+  if (!opts.json) {
+    if (!entries.length) {
+      opts.log("\n还没有历史结果。先跑一次: ai-toolbox iq-run <供应商> --model <模型>");
+    } else {
+      opts.log(`\n智商测试历史（最近 ${entries.length} 条）:\n`);
+      for (const item of entries) {
+        const result = item.error
+          ? `失败 ${item.error.slice(0, 40)}`
+          : item.answer
+            ? `答案 ${item.answer}`
+            : item.inspect?.hasSvg && item.inspect?.hasAnimation
+              ? "SVG+动画"
+              : "已完成";
+        const seconds = item.elapsedMs != null ? `${Math.round(item.elapsedMs / 1000)}s` : "-";
+        const stamp = formatHistoryTime(item.at);
+        opts.log(
+          `  ${stamp}  ${String(item.topicTitle ?? "-").padEnd(16)} ${String(item.providerName ?? "-")}/${String(item.model ?? "-")}  ${result}  ${seconds}`,
+        );
+      }
+    }
+  }
+  return { command: "iq-history", entries };
 }
 
 async function cmdQoderStatus(opts) {
@@ -1193,6 +1235,8 @@ async function main() {
       ccswitch: { type: "boolean", default: false },
       timeout: { type: "string" },
       "dry-run": { type: "boolean", default: false },
+      clear: { type: "boolean", default: false },
+      limit: { type: "string" },
       "with-secrets": { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       host: { type: "string", multiple: true },
@@ -1243,6 +1287,8 @@ async function main() {
     port: values.port ? Number(values.port) : null,
     host: values.host,
     action: values.action,
+    clear: values.clear,
+    limit: values.limit,
   };
 
   const [command, arg] = positionals;
@@ -1362,6 +1408,9 @@ async function main() {
     case "iq-run":
       if (!arg) throw new Error("用法: ai-toolbox iq-run <供应商> --model <模型>");
       result = await cmdIqRun(arg, opts);
+      break;
+    case "iq-history":
+      result = cmdIqHistory(opts);
       break;
     case "go-keys":
       result = cmdGoKeys(opts);

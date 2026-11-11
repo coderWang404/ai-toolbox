@@ -46,6 +46,10 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var iqReplyScroll: NSScrollView!
     private var iqLogScroll: NSScrollView!
     private var iqLogHeight: NSLayoutConstraint!
+    private var iqStream: NSTextView!
+    private var iqStreamScroll: NSScrollView!
+    private var iqStreamHeight: NSLayoutConstraint!
+    private var iqHistory: IqHistoryPane!
     private var iqRunButton: NSButton!
     private var iqCancelButton: NSButton!
     private var iqTimerLabel: NSTextField!
@@ -344,6 +348,33 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         iqLogHeight = logScroll.heightAnchor.constraint(equalToConstant: 0)
         iqLogHeight.isActive = true
         logScroll.isHidden = true
+
+        // 模型实时输出（流式文本），只在运行中显示。
+        iqStream = NSTextView()
+        iqStream.isEditable = false
+        iqStream.isSelectable = true
+        iqStream.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        iqStream.textColor = .labelColor
+        iqStream.drawsBackground = false
+        iqStream.textContainerInset = NSSize(width: 10, height: 8)
+        iqStream.isHorizontallyResizable = false
+        iqStream.textContainer?.widthTracksTextView = true
+        let streamScroll = NSScrollView()
+        streamScroll.documentView = iqStream
+        streamScroll.hasVerticalScroller = true
+        streamScroll.autohidesScrollers = true
+        streamScroll.scrollerStyle = .overlay
+        streamScroll.drawsBackground = false
+        streamScroll.contentView.drawsBackground = false
+        streamScroll.wantsLayer = true
+        streamScroll.layer?.cornerRadius = 8
+        streamScroll.layer?.borderWidth = 1
+        streamScroll.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        streamScroll.translatesAutoresizingMaskIntoConstraints = false
+        iqStreamScroll = streamScroll
+        iqStreamHeight = streamScroll.heightAnchor.constraint(equalToConstant: 0)
+        iqStreamHeight.isActive = true
+        streamScroll.isHidden = true
         iqEmptyLabel = makeLabel("选择题目和模型后点「开始测试」", font: .systemFont(ofSize: 13), color: .secondaryLabelColor)
         let previewWeb = QuietWebView()
         previewWeb.navigationDelegate = previewWeb
@@ -419,19 +450,23 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         let runRow = NSStackView(views: [flexibleSpace(), iqTimerLabel, iqCancelButton, iqRunButton])
         runRow.orientation = .horizontal
         runRow.spacing = 10
-        let resultGroup = NSStackView(views: [iqMetaLabel, logScroll, preview, iqActions])
+        let resultGroup = NSStackView(views: [iqMetaLabel, logScroll, streamScroll, preview, iqActions])
         resultGroup.orientation = .vertical
         resultGroup.alignment = .leading
         resultGroup.spacing = 8
         iqPreviewHeight = preview.heightAnchor.constraint(equalToConstant: 720)
         iqPreviewHeight?.isActive = true
         logScroll.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
+        streamScroll.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
         preview.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
         iqActions.widthAnchor.constraint(equalTo: resultGroup.widthAnchor).isActive = true
+        iqHistory = IqHistoryPane()
+        iqHistory.onSelect = { [weak self] entry in self?.showIqHistory(entry) }
         let iqBody = NSStackView(views: [
             iqTargetSection,
             runRow,
             SectionView(title: "结果", content: resultGroup),
+            SectionView(title: "历史结果", content: iqHistory.root),
             iqStatusLabel,
         ])
         iqBody.orientation = .vertical
@@ -1307,6 +1342,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
 
     func refreshIq() {
         reloadIqProviders()
+        iqHistory?.refresh()
         if !iqDidLoadResult {
             iqDidLoadResult = true
             loadLastIqResult()
@@ -1493,6 +1529,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         startIqTimer()
         iqStatusLabel.set("正在测试 \(topicTitle) · \(provider.name) / \(model) · \(thinkingTitle(thinking))…")
         iqLog?.string = ""
+        iqStream?.string = ""
+        setIqStreamVisible(false)
         iqReply?.string = ""
         iqReplyScroll?.isHidden = true
         iqWeb?.isHidden = false
@@ -1523,6 +1561,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                     } else {
                         self.iqStatusLabel.set("❌ \(message)")
                     }
+                    self.iqHistory?.refresh()
                 }
             }
         }
@@ -1561,6 +1600,12 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                 iqEmptyLabel?.isHidden = true
                 let url = URL(fileURLWithPath: path)
                 iqWeb?.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            } else if line.hasPrefix("TEXT ") {
+                let encoded = String(line.dropFirst(5))
+                if let data = Data(base64Encoded: encoded),
+                   let text = String(data: data, encoding: .utf8) {
+                    appendIqStream(text)
+                }
             } else if line.hasPrefix("STEP ") {
                 let text = String(line.dropFirst(5))
                 appendIqLine(text)
@@ -1569,6 +1614,18 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                 appendIqLine("工作目录已准备")
             }
         }
+    }
+
+    private func appendIqStream(_ text: String) {
+        guard let iqStream else { return }
+        iqStream.string += text
+        setIqStreamVisible(true)
+        iqStream.scrollToEndOfDocument(nil)
+    }
+
+    private func setIqStreamVisible(_ visible: Bool) {
+        iqStreamScroll?.isHidden = !visible
+        iqStreamHeight?.constant = visible ? 150 : 0
     }
 
     private func appendIqLine(_ text: String) {
@@ -1599,7 +1656,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         if state == "paused" {
             iqRunButton?.title = "继续"
             iqRunButton?.isEnabled = true
-            iqStatusLabel.set("已暂停")
+            iqStatusLabel.set("已暂停，当前进度已保留")
         } else if state == "running" {
             iqRunButton?.title = "暂停"
             iqRunButton?.isEnabled = true
@@ -1609,6 +1666,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private func finishIqRun() {
         iqPhase = "idle"
         stopIqTimer()
+        setIqStreamVisible(false)
         setBusy(false)
         iqRunButton?.title = "开始测试"
         iqRunButton?.isEnabled = true
@@ -1616,6 +1674,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     private func showIq(_ result: IqRunResult) {
+        iqHistory?.refresh()
         if result.stopReason == "cancelled", result.htmlPath == nil, (result.reply ?? "").isEmpty {
             iqStatusLabel.set("已取消")
             iqRunButton?.title = "开始测试"
@@ -1666,7 +1725,63 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         iqPreviewHeight?.constant = 720
         let url = URL(fileURLWithPath: html)
         iqWeb.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        sidebar?.setDetail(page: 3, result.model ?? "鹈鹕骑车")
+        sidebar?.setDetail(page: 2, result.model ?? iqModelPopup.titleOfSelectedItem ?? "鹈鹕骑车")
+    }
+
+    /// 点历史行：回看当时的页面/回复，不改当前选择。
+    private func showIqHistory(_ item: IqHistoryEntry) {
+        iqPhase = "idle"
+        stopIqTimer()
+        setIqStreamVisible(false)
+        iqRunButton?.title = "开始测试"
+        iqRunButton?.isEnabled = true
+        iqCancelButton?.isHidden = true
+
+        var parts: [String] = [item.topicTitle ?? item.topic ?? "历史结果"]
+        let modelText = [item.providerName, item.model].compactMap { $0 }.joined(separator: " / ")
+        if !modelText.isEmpty { parts.append(modelText) }
+        if item.error != nil {
+            parts.append("失败")
+        } else if let answer = item.answer, !answer.isEmpty {
+            parts.append("答案 \(answer)")
+        } else if item.inspect?.hasSvg == true, item.inspect?.hasAnimation == true {
+            parts.append("SVG 和动画都有")
+        } else if item.stopReason == "cancelled" {
+            parts.append("已取消")
+        } else {
+            parts.append("已完成")
+        }
+        if let ms = item.elapsedMs { parts.append("用时 \(Int((Double(ms) / 1000).rounded())) 秒") }
+        if let at = item.at, at.count >= 16 {
+            parts.append(at.prefix(16).replacingOccurrences(of: "T", with: " "))
+        }
+        iqMetaLabel?.stringValue = parts.joined(separator: " · ")
+        iqStatusLabel.set("正在看历史结果（只读）；点「开始测试」会重新跑一次", tone: .info)
+
+        iqReply?.string = ""
+        iqEmptyLabel?.isHidden = true
+        let html = item.htmlPath.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        if let html {
+            iqReplyScroll?.isHidden = true
+            iqWeb?.isHidden = false
+            iqWeb?.forwardsWheelToParent = true
+            iqFitPasses = 0
+            iqPreviewHeight?.constant = 720
+            let url = URL(fileURLWithPath: html)
+            iqWeb.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else if let reply = item.reply, !reply.isEmpty {
+            iqWeb?.isHidden = true
+            iqReplyScroll?.isHidden = false
+            iqReply?.string = reply
+            fitIqReply()
+        } else {
+            iqWeb?.isHidden = true
+            iqReplyScroll?.isHidden = true
+            iqEmptyLabel?.isHidden = false
+            iqEmptyLabel?.stringValue = item.error.map { "失败：\($0)" } ?? "这条历史没有可回看的页面或回复"
+            iqPreviewHeight?.constant = 360
+        }
+        if let model = item.model { sidebar?.setDetail(page: 2, model) }
     }
 
     private func fitIqPreview(_ measured: CGFloat) {

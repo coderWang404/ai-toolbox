@@ -95,6 +95,7 @@ ai-toolbox remote-status           # 查看远程正在使用的供应商和密�
 ai-toolbox remote-versions         # 检查远端 Codex / cc-switch / Claude Code 版本
 ai-toolbox remote-update           # 把远端更新到最新（默认只更新过时的；--dry-run 预览）
 ai-toolbox iq-list                 # 列出可用于智商测试的供应商
+ai-toolbox iq-history              # 查看智商测试历史（--limit N / --clear）
 ai-toolbox go-quota                # 查询 OpenCode Go 三窗口额度
 ai-toolbox cline-quota             # 查询 ClinePass 三窗口额度和余额
 ai-toolbox qoder-status            # Qoder 网络状态（DNS/hosts/Clash/HTTPDNS/日志）
@@ -239,7 +240,12 @@ Claude Desktop 走的是 Claude-3p 的 `configLibrary` 配置（不是 settings.
 - 题目：鹈鹕骑自行车、秦始皇骑自行车买菜、香蕉人开小汽车（SVG 动画），摸糖保证题（纯文字）；
 - 运行中每 10 秒发一次心跳，命令的 `--timeout` 现在是「多久没有新进度」而不是总时长，
   所以慢模型不会再在 120 秒被误杀；界面右侧会显示已用时，可随时暂停/取消；
+- 模型输出会实时流到「结果」上方的输出区（CLI 用 base64 行传递，不污染 stdout）；
+- 暂停会立刻停住当前生成，但保留已生成的内容和 `index.html`；点「继续」会从断点接着写，
+  不会从头再来；
 - 超时或失败时，已经写出的 `index.html` / 已生成的内容会保留，可以直接在浏览器打开；
+- 每次结果都会写入历史（`~/.ai-toolbox/iq-history.json`，最多 50 条），
+  「历史结果」里点一行可以回看当时的文字或页面；`ai-toolbox iq-history --clear` 清空；
 - 界面会记住上次的题目、供应商、模型和思考强度，下次打开直接继续。
 
 ## 远端版本检查 / 更新

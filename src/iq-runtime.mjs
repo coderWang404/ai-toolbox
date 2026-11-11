@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { dataDir, dataFile } from "./paths.mjs";
+import { appendIqHistory } from "./iq-history.mjs";
 import readline from "node:readline";
 
 process.env.PI_OFFLINE = "1";
@@ -318,6 +319,19 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
   const task = prompt || iqPrompt(chosen.id);
   let failure = "";
   let reply = "";
+  let partial = "";
+  let streamBuffer = "";
+  let lastEmit = 0;
+  let thrown = null;
+  // 把模型流式文本按批编码成一行，避免换行/控制字符破坏 IPC。
+  const flushStream = (force = false) => {
+    if (!streamBuffer) return;
+    const now = Date.now();
+    if (!force && now - lastEmit < 120 && streamBuffer.length < 600) return;
+    lastEmit = now;
+    log(`TEXT ${Buffer.from(streamBuffer, "utf8").toString("base64")}`);
+    streamBuffer = "";
+  };
   try {
     const channel = writeModels(agentDir, provider, model, thinking);
     const authStorage = AuthStorage.create(path.join(agentDir, "auth.json"));
@@ -352,7 +366,25 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
     }));
     attachControl(session, control);
     const problems = { text: "" };
-    session.subscribe((event) => describeEvent(event, log, problems));
+    session.subscribe((event) => {
+      describeEvent(event, log, problems);
+      if (event.type === "message_start" && event.message?.role === "assistant") partial = "";
+      if (event.type === "message_update") {
+        const inner = event.assistantMessageEvent;
+        if (inner?.type === "text_delta" && typeof inner.delta === "string" && inner.delta) {
+          partial += inner.delta;
+          streamBuffer += inner.delta;
+          flushStream();
+        } else if (inner?.type === "text_end") {
+          flushStream(true);
+        }
+      }
+      if (event.type === "message_end") {
+        flushStream(true);
+        const text = assistantText(event.message);
+        if (text) partial = text;
+      }
+    });
     const toolNames = (session.agent?.state?.tools || []).map((tool) => tool.name).filter(Boolean);
     log(`RUN_DIR ${dir}`);
     log(`STEP 已启动 pi · ${channel.api}`);
@@ -377,13 +409,17 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
       }
       if (control.cancelled) break;
       if (control.paused) {
+        flushStream(true);
         log("STATE paused");
-        log("STEP 已暂停");
+        const tail = partial.trim().slice(-400);
+        log("STEP 已暂停，进度已保留");
         await waitControl(control);
         if (control.cancelled) break;
+        const hint = tail.length >= 20 ? `上次生成到：「${tail}」。请从中断处继续，不要重复已写内容。` : "";
         instruction = textTask
-          ? "继续用文字把这道题算完。不要调用工具，不要联网。最后单独一行写「答案：」和正整数。"
-          : "继续完成 index.html。写完并确认后就结束。";
+          ? `继续用文字把这道题算完。${hint}不要调用工具，不要联网。最后单独一行写「答案：」和正整数。`
+          : `继续完成 index.html。${hint}写完并确认后就结束。`;
+        partial = "";
         continue;
       }
       if (textTask) {
@@ -422,7 +458,10 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
       reminders += 1;
       instruction = "index.html 还不存在。请现在调用 write 工具，把完整 HTML 写入 index.html，然后结束。";
     }
+  } catch (error) {
+    thrown = error;
   } finally {
+    flushStream(true);
     clearInterval(watch);
     clearInterval(heartbeat);
     if (!announced && existsSync(htmlFile)) {
@@ -436,6 +475,30 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
     }
     rmSync(agentDir, { recursive: true, force: true });
     control.close?.();
+  }
+
+  if (thrown) {
+    const message = publicError(thrown?.message ?? thrown);
+    try {
+      appendIqHistory({
+        topic: chosen.id,
+        topicTitle: chosen.title,
+        providerId: provider.id,
+        providerName: provider.name,
+        model,
+        thinking,
+        reply: reply || null,
+        answer: extractAnswer(reply),
+        elapsedMs: Date.now() - started,
+        stopReason: "error",
+        htmlPath: existsSync(htmlFile) ? htmlFile : null,
+        inspect: inspectHtml(dir),
+        error: message,
+      });
+    } catch {
+      /* 历史写失败不影响主流程 */
+    }
+    throw thrown;
   }
 
   if (control.cancelled) log("STATE cancelled");
@@ -459,6 +522,11 @@ export async function runIqTest({ provider, model, thinking = "off", topic = "pe
   };
   writeFileSync(lastRunPath(), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 });
   try { chmodSync(lastRunPath(), 0o600); } catch { /* 忽略 */ }
+  try {
+    appendIqHistory({ ...summary, error: failure ? publicError(failure) : null });
+  } catch {
+    /* 历史写失败不影响主流程 */
+  }
   if (existsSync(htmlFile)) {
     try { chmodSync(htmlFile, 0o600); } catch { /* 忽略 */ }
   }

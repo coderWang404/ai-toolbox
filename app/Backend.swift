@@ -402,6 +402,14 @@ final class Backend {
         return result
     }
 
+    func iqHistory(limit: Int = 20) throws -> IqHistoryResult {
+        try decode(IqHistoryResult.self, from: run(["iq-history", "--limit", String(limit)], timeout: 30))
+    }
+
+    func iqClearHistory() throws -> IqHistoryResult {
+        try decode(IqHistoryResult.self, from: run(["iq-history", "--clear"], timeout: 30))
+    }
+
     func iqControl(_ command: String) {
         guard command == "pause" || command == "resume" || command == "cancel" else { return }
         guard let stdin = controlledStdin, let process = controlledProcess, process.isRunning else { return }

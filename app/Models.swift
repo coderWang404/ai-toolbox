@@ -368,6 +368,31 @@ struct IqInspect: Codable {
     let hasAnimation: Bool?
 }
 
+struct IqHistoryEntry: Codable {
+    let id: String?
+    let at: String?
+    let topic: String?
+    let topicTitle: String?
+    let providerId: String?
+    let providerName: String?
+    let model: String?
+    let thinking: String?
+    let answer: String?
+    let reply: String?
+    let replyTruncated: Bool?
+    let elapsedMs: Int?
+    let stopReason: String?
+    let htmlPath: String?
+    let inspect: IqInspect?
+    let error: String?
+}
+
+struct IqHistoryResult: Codable {
+    let ok: Bool?
+    let entries: [IqHistoryEntry]?
+    let cleared: Bool?
+}
+
 struct IqRunResult: Codable {
     let ok: Bool?
     let error: String?
