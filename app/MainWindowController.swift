@@ -1593,7 +1593,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     }
 
     func selectPage(_ index: Int) {
-        let page = [0, 1, 2, 3, 4, 5].contains(index) ? index : 0
+        let page = [0, 1, 2, 3, 4, 5, 6, 7].contains(index) ? index : 0
         defaults.set(page, forKey: "mainPage")
         showPage(page)
     }

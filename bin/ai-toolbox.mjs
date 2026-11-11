@@ -77,7 +77,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox switch <名称/ID>      切换供应商并热重启 Codex（核心命令）
   ai-toolbox claude-list           列出 Claude Code 供应商
   ai-toolbox claude-current        查看 Claude Code 当前生效的配置
-  ai-toolbox claude-switch <名称/ID>  切换 Claude Code 供应商（写 ~/.claude/settings.json）
+  ai-toolbox claude-switch <名称/ID>  切换 Claude Code 供应商并自动同步远端（--no-sync-remote 跳过）
   ai-toolbox cdesktop-list         列出 Claude Desktop 供应商
   ai-toolbox cdesktop-current      查看 Claude Desktop 当前网关
   ai-toolbox cdesktop-switch <名称/ID>  切换 Claude Desktop（写 Claude-3p 配置并重启应用）
@@ -783,8 +783,9 @@ function cmdClaudeCurrent(opts) {
   return { command: "claude-current", ...status };
 }
 
-function cmdClaudeSwitch(query, opts) {
+async function cmdClaudeSwitch(query, opts) {
   const result = switchClaudeProvider(query, { dryRun: opts.dryRun });
+  let remote = null;
   if (!opts.json) {
     if (opts.dryRun) {
       opts.log(`[dry-run] 将切换到 ${result.provider.name}（${result.provider.host ?? "-"}）`);
@@ -796,7 +797,19 @@ function cmdClaudeSwitch(query, opts) {
       opts.log("  新开 Claude Code 会话时生效");
     }
   }
-  return { command: "claude-switch", ...result, provider: { id: result.provider.id, name: result.provider.name } };
+  if (!opts.dryRun && opts.syncRemoteAfterSwitch !== false) {
+    try {
+      remote = await syncClaudeRemotes({ log: opts.log });
+    } catch (err) {
+      opts.warn?.(`  ⚠️ 远端同步失败: ${err.message ?? err}`);
+    }
+  }
+  return {
+    command: "claude-switch",
+    ...result,
+    provider: { id: result.provider.id, name: result.provider.name },
+    remote,
+  };
 }
 
 function cmdClaudeDesktopList(opts) {
@@ -1150,6 +1163,7 @@ async function main() {
       "no-reload": { type: "boolean", default: false },
       "no-remote": { type: "boolean", default: false },
       "no-model-probe": { type: "boolean", default: false },
+      "no-sync-remote": { type: "boolean", default: false },
       "no-latest": { type: "boolean", default: false },
       "no-download": { type: "boolean", default: false },
       codex: { type: "boolean", default: false },
@@ -1183,6 +1197,7 @@ async function main() {
     reload: !values["no-reload"],
     remote: !values["no-remote"],
     modelProbe: !values["no-model-probe"],
+    syncRemoteAfterSwitch: !values["no-sync-remote"],
     latest: !values["no-latest"],
     download: !values["no-download"],
     codex: values.codex || !values.ccswitch,
@@ -1213,6 +1228,8 @@ async function main() {
       "remote-versions": 300 * 1000,
       "sync-remote": 300 * 1000,
       "sync-ccswitch": 600 * 1000,
+      "claude-switch": 300 * 1000,
+      "claude-sync-remote": 300 * 1000,
     };
     opts.timeoutMs = defaults[command] ?? 120 * 1000;
   }
@@ -1284,7 +1301,7 @@ async function main() {
       break;
     case "claude-switch":
       if (!arg) throw new Error("用法: ai-toolbox claude-switch <名称/ID>");
-      result = cmdClaudeSwitch(arg, opts);
+      result = await cmdClaudeSwitch(arg, opts);
       break;
     case "remote-versions":
       result = await cmdRemoteVersions(opts);

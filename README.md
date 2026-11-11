@@ -81,7 +81,7 @@ ai-toolbox current                 # 查看当前供应商 + 实际生效配置 
 ai-toolbox switch <名称或 ID>       # 切换供应商并热重启 Codex（核心命令）
 ai-toolbox claude-list             # 列出 cc-switch 里的 Claude Code 供应商
 ai-toolbox claude-current          # 查看 Claude Code 当前生效的端点与模型
-ai-toolbox claude-switch <名称或 ID> # 切换 Claude Code（写 ~/.claude/settings.json）
+ai-toolbox claude-switch <名称或 ID> # 切换 Claude Code 并自动同步远端（--no-sync-remote 跳过）
 ai-toolbox claude-sync-remote       # 把 Claude Code 配置同步到远程（只换 env）
 ai-toolbox cdesktop-list           # 列出 Claude Desktop 供应商
 ai-toolbox cdesktop-current        # 查看 Claude Desktop 当前网关
@@ -219,7 +219,10 @@ Codex 桌面端把项目列表 / 会话归属按 ChatGPT 账号隔离。cc-switc
 - 同时把 cc-switch 的 `is_current` 和 `currentProviderClaude` 标记同步回去；
 - 写盘前备份到 `~/.claude/settings.json.bak_*`；
 - Claude Code 在启动时读配置，所以「新开会话生效」，不需要重启进程；
-- 页面上的「同步到远端」会把本机 `env` 推到远程机器的 `~/.claude/settings.json`（远端其它设置保留）。
+- 切换成功后**自动**把 `env` 推到 4 台远程机器的 `~/.claude/settings.json`（远端其它设置保留）；
+  用 `--no-sync-remote` 可以只切本机；页面上的「自动同步远端」勾选框控制同样的行为；
+- 页面每 3 秒比对一次 `~/.claude/settings.json` 的 `env` 指纹：不管是本页切换，
+  还是直接在 cc-switch 里切换/手动改配置，都会自动刷新列表并把新配置同步到远端。
 
 ## Claude Desktop 页
 

@@ -20,6 +20,11 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
     private var rows: [Row] = []
     private var currentId: String?
     private var busy = false
+    private var syncingRemote = false
+    private var envFingerprint: String?
+    private var watchTimer: Timer?
+    private let defaults = UserDefaults.standard
+    private let autoSyncCheck = NSButton(checkboxWithTitle: "自动同步远端", target: nil, action: nil)
 
     private let headerLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "读取中…")
@@ -62,6 +67,14 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         syncButton.action = #selector(syncRemotesNow)
         syncButton.isHidden = mode != .code
 
+        autoSyncCheck.controlSize = .small
+        autoSyncCheck.font = .systemFont(ofSize: 11)
+        autoSyncCheck.isHidden = mode != .code
+        autoSyncCheck.target = self
+        autoSyncCheck.action = #selector(autoSyncToggled)
+        let autoSyncOn = defaults.object(forKey: "claudeAutoSyncRemote") as? Bool ?? true
+        autoSyncCheck.state = autoSyncOn ? .on : .off
+
         table.headerView = nil
         table.rowHeight = 44
         table.selectionHighlightStyle = .none
@@ -84,7 +97,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.heightAnchor.constraint(equalToConstant: 236).isActive = true
 
-        let headerRow = NSStackView(views: [headerLabel, spacer(), spinner, syncButton, refreshButton])
+        let headerRow = NSStackView(views: [headerLabel, spacer(), spinner, autoSyncCheck, syncButton, refreshButton])
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 8
@@ -117,7 +130,50 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         return view
     }
 
-    func onShow() { refresh() }
+    func onShow() {
+        refresh()
+        startWatchIfNeeded()
+    }
+
+    deinit { watchTimer?.invalidate() }
+
+    /// 本地 cc-switch / 手动改动 ~/.claude/settings.json 时，自动刷新列表并同步远端。
+    private func startWatchIfNeeded() {
+        guard mode == .code, watchTimer == nil else { return }
+        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.watchTick() }
+        RunLoop.main.add(timer, forMode: .common)
+        watchTimer = timer
+    }
+
+    @objc private func autoSyncToggled() {
+        defaults.set(autoSyncCheck.state == .on, forKey: "claudeAutoSyncRemote")
+        status.set(autoSyncCheck.state == .on
+            ? "已开启：切换供应商或在 cc-switch 里改动后自动同步远端"
+            : "已关闭自动同步远端，只在本机生效")
+    }
+
+    @objc private func watchTick() {
+        guard mode == .code, !busy, !syncingRemote else { return }
+        guard let fingerprint = settingsFingerprint() else { return }
+        guard let previous = envFingerprint else {
+            envFingerprint = fingerprint
+            return
+        }
+        guard previous != fingerprint else { return }
+        envFingerprint = fingerprint
+        status.set("检测到 Claude Code 配置变化，正在刷新…")
+        refresh()
+        if autoSyncCheck.state == .on { syncRemotes(auto: true) }
+    }
+
+    /// 只取 env（端点 / 密钥 / 模型档位）做指纹，不落盘、不打印。
+    private func settingsFingerprint() -> String? {
+        let path = NSString(string: "~/.claude/settings.json").expandingTildeInPath
+        guard let data = FileManager.default.contents(atPath: path),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let env = root["env"] as? [String: Any] else { return nil }
+        return env.keys.sorted().map { "\($0)=\(env[$0] ?? "")" }.joined(separator: "|")
+    }
 
     @objc private func refreshNow() { refresh() }
 
@@ -174,6 +230,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         self.table.reloadData()
         self.busy = false
         self.spinner.stopAnimation(nil)
+        if mode == .code { envFingerprint = settingsFingerprint() }
         self.detailLabel.stringValue = rows.isEmpty ? "cc-switch 里还没有对应供应商" : detail
         if let current = rows.first(where: { $0.id == currentId }) {
             self.headerLabel.stringValue = "当前：\(current.name)"
@@ -182,11 +239,13 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         }
     }
 
-    @objc private func syncRemotesNow() {
-        guard !busy else { return }
-        busy = true
+    @objc private func syncRemotesNow() { syncRemotes(auto: false) }
+
+    private func syncRemotes(auto: Bool) {
+        guard !syncingRemote else { return }
+        syncingRemote = true
         spinner.startAnimation(nil)
-        status.set("正在同步到远端…")
+        status.set(auto ? "检测到配置变化，正在同步到远端…" : "正在同步到远端…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
@@ -198,13 +257,13 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
                     ? "✔ 已同步到 \(hosts.count) 台远端（\(changed) 台有更新）"
                     : "⚠️ \(hosts.count - failed.count) 台成功，\(failed.count) 台失败：\(failed.compactMap { $0.label }.joined(separator: "、"))"
                 DispatchQueue.main.async {
-                    self.busy = false
+                    self.syncingRemote = false
                     self.spinner.stopAnimation(nil)
                     self.status.set(text)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.busy = false
+                    self.syncingRemote = false
                     self.spinner.stopAnimation(nil)
                     self.status.set("❌ 同步失败：\(error.localizedDescription)")
                 }
@@ -232,8 +291,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
                         if let error = result.error, !error.isEmpty {
                             self.finish(error: error)
                         } else {
-                            self.status.set("✔ 已切换到 \(result.provider?.name ?? item.name)：新开 Claude Code 会话时生效")
-                            self.refresh()
+                            self.finishOk("✔ 已切换到 \(result.provider?.name ?? item.name)：新开 Claude Code 会话时生效")
                         }
                     }
                 } else {
@@ -242,8 +300,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
                         if let error = result.error, !error.isEmpty {
                             self.finish(error: error)
                         } else {
-                            self.status.set("✔ 已切换到 \(result.provider?.name ?? item.name)，Claude Desktop 已重新打开")
-                            self.refresh()
+                            self.finishOk("✔ 已切换到 \(result.provider?.name ?? item.name)，Claude Desktop 已重新打开")
                         }
                     }
                 }
@@ -251,6 +308,14 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
                 DispatchQueue.main.async { self.finish(error: error.localizedDescription) }
             }
         }
+    }
+
+    /// 必须先释放 busy 再刷新，否则 refresh 会被自己的 guard 挡掉，页面就“点不动”了。
+    private func finishOk(_ text: String) {
+        busy = false
+        spinner.stopAnimation(nil)
+        status.set(text)
+        refresh()
     }
 
     private func finish(error: String) {
