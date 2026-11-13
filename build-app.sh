@@ -65,4 +65,4 @@ codesign --force --deep --sign - "$APP" 2>/dev/null || echo "    (签名跳过�
 echo ""
 echo "✅ 构建完成: $APP"
 echo "   运行: open \"$APP\""
-echo "   安装: cp -R \"$APP\" /Applications/"
+echo "   安装: ./install-app.sh（会退出旧版、刷新图标缓存再启动）"

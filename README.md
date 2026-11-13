@@ -45,8 +45,11 @@ ChatGPT 应用会自动拉起新的 app-server，从而一次性刷新：模型�
 open "dist/AI 工具箱.app"
 
 # 安装到应用程序目录（推荐，登录启动功能依赖标准路径）
-cp -R "dist/AI 工具箱.app" /Applications/
+./install-app.sh
 ```
+
+`install-app.sh` 会先退出旧版、替换 bundle、强制刷新 LaunchServices 图标缓存再启动。
+直接 `cp -R` 覆盖正在运行的旧 bundle，Dock 可能缓存到旧图标，显示成空白方块。
 
 界面说明：
 
@@ -446,5 +449,6 @@ src/templates/            cc-switch 的模型目录模板（vendored）
 app/                      桌面 App（Swift / AppKit，含 TodayPane、QoderNetworkPane）
 tools/make-icon.swift     图标生成
 build-app.sh              一键构建 .app
+install-app.sh            安装到 /Applications 并刷新图标缓存
 dist/AI 工具箱.app         构建产物
 ```
