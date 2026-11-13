@@ -350,8 +350,14 @@ final class Backend {
         try decode(ClaudeDesktopListResult.self, from: run(["cdesktop-list"], timeout: 40))
     }
 
-    func claudeDesktopSwitch(_ id: String) throws -> ClaudeDesktopSwitchResult {
-        try decode(ClaudeDesktopSwitchResult.self, from: run(["cdesktop-switch", id], timeout: 150))
+    func claudeDesktopSwitch(_ id: String, force: Bool = false) throws -> ClaudeDesktopSwitchResult {
+        var args = ["cdesktop-switch", id]
+        if force { args.append("--force") }
+        return try decode(ClaudeDesktopSwitchResult.self, from: run(args, timeout: 150))
+    }
+
+    func claudeDesktopUseMagpie() throws -> ClaudeDesktopUseMagpieResult {
+        try decode(ClaudeDesktopUseMagpieResult.self, from: run(["cdesktop-use-magpie"], timeout: 150))
     }
 
     func claudeSyncRemote() throws -> ClaudeSyncRemoteResult {

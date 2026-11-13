@@ -84,8 +84,9 @@ ai-toolbox claude-current          # 查看 Claude Code 当前生效的端点与
 ai-toolbox claude-switch <名称或 ID> # 切换 Claude Code 并自动同步远端（--no-sync-remote 跳过）
 ai-toolbox claude-sync-remote       # 把 Claude Code 配置同步到远程（只换 env）
 ai-toolbox cdesktop-list           # 列出 Claude Desktop 供应商
-ai-toolbox cdesktop-current        # 查看 Claude Desktop 当前网关
+ai-toolbox cdesktop-current        # 查看 Claude Desktop 当前网关与接管方
 ai-toolbox cdesktop-switch <名称>   # 切换 Claude Desktop（写 Claude-3p 并重启应用）
+ai-toolbox cdesktop-use-magpie     # 把 Claude Desktop 交回 Magpie 接管
 ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换后用这个）
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
 ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔离寄存
@@ -232,6 +233,18 @@ Claude Desktop 走的是 Claude-3p 的 `configLibrary` 配置（不是 settings.
 并可能需要把 `claude_desktop_config.json` 的 `deploymentMode` 设为 `3p`。
 桌面应用只在启动时读取，所以切换后会**退出并重新打开 Claude.app**；
 支持直连供应商和 cc-switch 本地代理两种模式。
+
+页面会自动识别**谁在接管** Claude Desktop：读 `configLibrary/_meta.json` 的 `appliedId`，
+指向 `...157210` 就是 CC Switch，指向 `...6d6167706965`（magpie 的十六进制）就是 Magpie。
+Magpie 接管时会显示橙色横幅（含 Magpie 当前模型），列表里的 cc-switch 供应商只标成
+「cc-switch 记录」；点这些行会先确认，再切回 CC Switch 并重启 Claude，不会悄悄抢回来。
+也可以点「交给 Magpie」把 `appliedId` 翻回 Magpie。CLI：
+
+```bash
+ai-toolbox cdesktop-current        # 当前接管方 + 实际网关
+ai-toolbox cdesktop-switch <名称>   # Magpie 接管时需加 --force
+ai-toolbox cdesktop-use-magpie     # 交回 Magpie（--no-reload 不重启）
+```
 
 ## 智商测试
 

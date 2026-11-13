@@ -522,7 +522,7 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         claudeCodePane = ClaudeProvidersPane(mode: .code)
         claudeCodePage = wrapPage("Claude Code", "跟随 cc-switch 切换 Claude Code 供应商（写入 ~/.claude/settings.json）", claudeCodePane)
         claudeDesktopPane = ClaudeProvidersPane(mode: .desktop)
-        claudeDesktopPage = wrapPage("Claude Desktop", "跟随 cc-switch 切换 Claude Desktop 供应商（写 Claude-3p 配置并重启应用）", claudeDesktopPane)
+        claudeDesktopPage = wrapPage("Claude Desktop", "自动识别 CC Switch / Magpie 谁在接管；切换前会确认并重启应用", claudeDesktopPane)
         ccPane = wrapPage("cc-switch 同步", "以本机 cc-switch 为准，同步到远程机器", ccPane)
 
         claudeCodePane?.startWatching()

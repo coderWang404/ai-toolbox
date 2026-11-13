@@ -199,10 +199,22 @@ struct ClaudeAppliedProfile: Codable {
     let provider: String?
 }
 
+struct ClaudeDesktopManagerInfo: Codable {
+    let manager: String?
+    let name: String?
+    let appliedId: String?
+    let magpieRunning: Bool?
+    let magpieProfileExists: Bool?
+    let magpieModel: String?
+    let magpieAppliedAt: String?
+    let claudeRunning: Bool?
+}
+
 struct ClaudeDesktopListResult: Codable {
     let ok: Bool
     let error: String?
     let currentId: String?
+    let manager: ClaudeDesktopManagerInfo?
     let providers: [ClaudeDesktopProviderSummary]?
     let applied: ClaudeAppliedProfile?
 }
@@ -212,6 +224,15 @@ struct ClaudeDesktopSwitchResult: Codable {
     let error: String?
     let provider: ClaudeDesktopProviderSummary?
     let applied: ClaudeAppliedProfile?
+    let reload: ReloadDetail?
+    let previousManager: String?
+    let manager: ClaudeDesktopManagerInfo?
+}
+
+struct ClaudeDesktopUseMagpieResult: Codable {
+    let ok: Bool
+    let error: String?
+    let manager: ClaudeDesktopManagerInfo?
     let reload: ReloadDetail?
 }
 

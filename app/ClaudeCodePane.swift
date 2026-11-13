@@ -27,6 +27,16 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
     private let defaults = UserDefaults.standard
     private let autoSyncCheck = NSButton(checkboxWithTitle: "自动同步远端", target: nil, action: nil)
 
+    // Claude Desktop 专用：显示当前是谁在接管（CC Switch / Magpie）。
+    private let managerBanner = NSView()
+    private let managerIcon = NSImageView()
+    private let managerTitle = NSTextField(labelWithString: "")
+    private let managerDetail = NSTextField(labelWithString: "")
+    private let handoffButton = NSButton(title: "", target: nil, action: nil)
+    private var desktopManager: String?
+    private var magpieProfileExists = false
+    private var managerTimer: Timer?
+
     private let headerLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "读取中…")
     private let table = NSTableView()
@@ -124,10 +134,55 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         headerRow.alignment = .centerY
         headerRow.spacing = 10
 
+        // 接管方横幅：Magpie 在接管时用橙色提示，CC Switch 用绿色。
+        managerBanner.wantsLayer = true
+        managerBanner.layer?.cornerRadius = 10
+        managerBanner.layer?.borderWidth = 1
+        managerBanner.translatesAutoresizingMaskIntoConstraints = false
+        managerBanner.isHidden = mode != .desktop
+
+        managerIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        managerIcon.imageScaling = .scaleProportionallyDown
+        managerIcon.translatesAutoresizingMaskIntoConstraints = false
+        managerIcon.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        managerIcon.heightAnchor.constraint(equalToConstant: 20).isActive = true
+
+        managerTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        managerTitle.lineBreakMode = .byTruncatingTail
+        managerDetail.font = .systemFont(ofSize: 11)
+        managerDetail.textColor = .secondaryLabelColor
+        managerDetail.lineBreakMode = .byTruncatingTail
+        managerDetail.maximumNumberOfLines = 2
+
+        let managerText = NSStackView(views: [managerTitle, managerDetail])
+        managerText.orientation = .vertical
+        managerText.alignment = .leading
+        managerText.spacing = 2
+        managerText.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        handoffButton.bezelStyle = .rounded
+        handoffButton.controlSize = .small
+        handoffButton.target = self
+        handoffButton.action = #selector(handoffTapped)
+
+        let managerRow = NSStackView(views: [managerIcon, managerText, spacer(), handoffButton])
+        managerRow.orientation = .horizontal
+        managerRow.alignment = .centerY
+        managerRow.spacing = 10
+        managerRow.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        managerRow.translatesAutoresizingMaskIntoConstraints = false
+        managerBanner.addSubview(managerRow)
+        NSLayoutConstraint.activate([
+            managerRow.leadingAnchor.constraint(equalTo: managerBanner.leadingAnchor),
+            managerRow.trailingAnchor.constraint(equalTo: managerBanner.trailingAnchor),
+            managerRow.topAnchor.constraint(equalTo: managerBanner.topAnchor),
+            managerRow.bottomAnchor.constraint(equalTo: managerBanner.bottomAnchor),
+        ])
+
         let group = GroupBox()
         group.addRow(scroll)
 
-        let stack = NSStackView(views: [headerRow, group, status])
+        let stack = NSStackView(views: [headerRow, managerBanner, group, status])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -139,6 +194,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             headerRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            managerBanner.widthAnchor.constraint(equalTo: stack.widthAnchor),
             group.widthAnchor.constraint(equalTo: stack.widthAnchor),
             status.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
@@ -156,12 +212,24 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         startWatching()
     }
 
-    deinit { watchTimer?.invalidate() }
+    deinit {
+        watchTimer?.invalidate()
+        managerTimer?.invalidate()
+    }
 
-    /// 本地 cc-switch / 手动改动 ~/.claude/settings.json 时，自动刷新列表并同步远端。
+    /// Claude Code：每 3 秒比对 settings.json 指纹，并在配置变化时同步远端。
+    /// Claude Desktop：每 5 秒检查 configLibrary 的 appliedId，识别 cc-switch / Magpie 接管切换。
     /// App 启动时就会调用（不要求先打开本页），第一次比对时顺带把远端对齐一次。
     func startWatching() {
-        guard mode == .code, watchTimer == nil else { return }
+        if mode == .desktop {
+            guard managerTimer == nil else { return }
+            showDesktopManager(readDesktopManagerState())
+            let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.desktopWatchTick() }
+            RunLoop.main.add(timer, forMode: .common)
+            managerTimer = timer
+            return
+        }
+        guard watchTimer == nil else { return }
         let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in self?.watchTick() }
         RunLoop.main.add(timer, forMode: .common)
         watchTimer = timer
@@ -232,8 +300,10 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
                             note: p.proxyMode == true ? "走 cc-switch 代理" : (p.official == true ? "官方" : nil)
                         )
                     }
-                    let detail = "实际网关：\(list.applied?.host ?? "-")"
+                    let manager = self.readDesktopManagerState()
+                    let detail = "接管 \(self.managerText(manager.kind)) · 实际网关 \(list.applied?.host ?? "-")"
                     DispatchQueue.main.async {
+                        self.showDesktopManager(manager)
                         self.apply(rows: rows, currentId: list.currentId, detail: detail)
                     }
                 }
@@ -262,7 +332,9 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         self.spinner.stopAnimation(nil)
         if mode == .code { envFingerprint = settingsFingerprint() }
         self.detailLabel.stringValue = rows.isEmpty ? "cc-switch 里还没有对应供应商" : detail
-        if let current = rows.first(where: { $0.id == currentId }) {
+        if mode == .desktop, desktopManager == "magpie" {
+            self.headerLabel.stringValue = "Magpie 接管中"
+        } else if let current = rows.first(where: { $0.id == currentId }) {
             self.headerLabel.stringValue = current.name
         } else {
             self.headerLabel.stringValue = titleText
@@ -305,13 +377,16 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
         guard row >= 0, row < rows.count, !busy else { return }
         let item = rows[row]
-        guard item.id != currentId else {
+        let desktopUnderMagpie = mode == .desktop && desktopManager == "magpie"
+        guard item.id != currentId || desktopUnderMagpie else {
             status.set("已经是当前供应商")
             return
         }
+        if desktopUnderMagpie, !confirmDesktopTakeover(item.name) { return }
+        let force = desktopUnderMagpie
         busy = true
         spinner.startAnimation(nil)
-        status.set("正在切换到 \(item.name)…")
+        status.set(desktopUnderMagpie ? "正在从 Magpie 切回 \(item.name)…" : "正在切换到 \(item.name)…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
@@ -325,7 +400,7 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
                         }
                     }
                 } else {
-                    let result = try self.backend.claudeDesktopSwitch(item.id)
+                    let result = try self.backend.claudeDesktopSwitch(item.id, force: force)
                     DispatchQueue.main.async {
                         if let error = result.error, !error.isEmpty {
                             self.finish(error: error)
@@ -352,6 +427,195 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
         busy = false
         spinner.stopAnimation(nil)
         status.set("❌ \(error)")
+    }
+
+    // MARK: - 接管方（CC Switch / Magpie）
+
+    private struct DesktopManagerState {
+        let kind: String
+        let name: String
+        let model: String?
+        let profileExists: Bool
+    }
+
+    /// 直接读 Claude-3p 的 configLibrary/_meta.json：appliedId 指向谁，谁就在接管。
+    private func readDesktopManagerState() -> DesktopManagerState {
+        let base = ("~/Library/Application Support/Claude-3p/configLibrary" as NSString).expandingTildeInPath
+        let metaURL = URL(fileURLWithPath: base).appendingPathComponent("_meta.json")
+        var kind = "none"
+        var name = "未设置"
+        if let data = try? Data(contentsOf: metaURL),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let applied = root["appliedId"] as? String
+            let entries = root["entries"] as? [[String: Any]] ?? []
+            name = applied == nil ? "未设置" : "未知配置"
+            if let entry = entries.first(where: { ($0["id"] as? String) == applied }),
+               let entryName = entry["name"] as? String, !entryName.isEmpty {
+                name = entryName
+            }
+            switch applied {
+            case "00000000-0000-4000-8000-000000157210":
+                kind = "cc-switch"
+            case "00000000-0000-4000-8000-6d6167706965":
+                kind = "magpie"
+            case nil:
+                kind = "none"
+            default:
+                let lower = name.lowercased()
+                if lower.contains("magpie") {
+                    kind = "magpie"
+                } else if lower.contains("cc switch") || lower.contains("cc-switch") {
+                    kind = "cc-switch"
+                } else {
+                    kind = "unknown"
+                }
+            }
+        }
+
+        let modelPath = ("~/.config/magpie/claude-desktop.model" as NSString).expandingTildeInPath
+        let model = (try? String(contentsOfFile: modelPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let magpieProfile = URL(fileURLWithPath: base)
+            .appendingPathComponent("00000000-0000-4000-8000-6d6167706965.json").path
+        return DesktopManagerState(
+            kind: kind,
+            name: name,
+            model: (model?.isEmpty == false) ? model : nil,
+            profileExists: FileManager.default.fileExists(atPath: magpieProfile)
+        )
+    }
+
+    private func managerText(_ kind: String?) -> String {
+        switch kind {
+        case "magpie": return "Magpie"
+        case "cc-switch": return "CC Switch"
+        case "none": return "未设置"
+        default: return "未知"
+        }
+    }
+
+    private func showDesktopManager(_ state: DesktopManagerState) {
+        guard mode == .desktop else { return }
+        let changed = state.kind != desktopManager
+        desktopManager = state.kind
+        magpieProfileExists = state.profileExists
+
+        managerBanner.isHidden = false
+        switch state.kind {
+        case "magpie":
+            managerBanner.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.10).cgColor
+            managerBanner.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.30).cgColor
+            managerIcon.image = NSImage(systemSymbolName: "bird", accessibilityDescription: "Magpie")
+            managerIcon.contentTintColor = .systemOrange
+            managerTitle.stringValue = "Claude Desktop 现在由 Magpie 接管"
+            let tail = "点一行会先确认，再切回 CC Switch。"
+            managerDetail.stringValue = state.model.map { "Magpie 模型 \($0)。\(tail)" } ?? "cc-switch 的供应商只是记录，\(tail)"
+            handoffButton.title = "切回 CC Switch"
+            handoffButton.isHidden = currentId == nil
+        case "cc-switch":
+            managerBanner.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.08).cgColor
+            managerBanner.layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.25).cgColor
+            managerIcon.image = NSImage(systemSymbolName: "switch.2", accessibilityDescription: "CC Switch")
+            managerIcon.contentTintColor = .systemGreen
+            managerTitle.stringValue = "Claude Desktop 由 CC Switch 管理"
+            managerDetail.stringValue = "点下面的供应商切换；也可以交给 Magpie 的 agent 接管。"
+            handoffButton.title = "交给 Magpie"
+            handoffButton.isHidden = !state.profileExists
+        default:
+            managerBanner.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.06).cgColor
+            managerBanner.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
+            managerIcon.image = NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "未知接管方")
+            managerIcon.contentTintColor = .secondaryLabelColor
+            managerTitle.stringValue = "接管方未知"
+            managerDetail.stringValue = state.name == "未设置"
+                ? "configLibrary 里还没有 appliedId，Claude Desktop 可能还没进第三方模式。"
+                : "configLibrary 里的接管方「\(state.name)」无法识别。"
+            handoffButton.title = "交给 Magpie"
+            handoffButton.isHidden = !state.profileExists
+        }
+        if changed { table.reloadData() }
+    }
+
+    private func desktopWatchTick() {
+        guard mode == .desktop, !busy else { return }
+        let state = readDesktopManagerState()
+        let changed = state.kind != desktopManager
+        showDesktopManager(state)
+        if changed, state.kind != "unknown" {
+            status.set("检测到 Claude Desktop 接管方变化：\(managerText(state.kind))", tone: .info)
+            refresh()
+        }
+    }
+
+    private func confirmDesktopTakeover(_ name: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Claude Desktop 现在由 Magpie 接管"
+        alert.informativeText = "继续会改用 CC Switch 的「\(name)」，并重启 Claude Desktop；Magpie 的 agent 接管会中断。"
+        alert.addButton(withTitle: "切回 CC Switch")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    @objc private func handoffTapped() {
+        guard mode == .desktop, !busy else { return }
+        if desktopManager == "magpie" {
+            guard let id = currentId, let item = rows.first(where: { $0.id == id }) else {
+                status.set("cc-switch 里还没有可用的当前供应商，先在 cc-switch 里选一个", tone: .warning)
+                return
+            }
+            guard confirmDesktopTakeover(item.name) else { return }
+            busy = true
+            spinner.startAnimation(nil)
+            status.set("正在从 Magpie 切回 \(item.name)…")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+                do {
+                    let result = try self.backend.claudeDesktopSwitch(item.id, force: true)
+                    DispatchQueue.main.async {
+                        if let error = result.error, !error.isEmpty {
+                            self.finish(error: error)
+                        } else {
+                            self.finishOk("✔ 已从 Magpie 切回 \(result.provider?.name ?? item.name)，Claude Desktop 已重新打开")
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async { self.finish(error: error.localizedDescription) }
+                }
+            }
+            return
+        }
+
+        guard magpieProfileExists else {
+            status.set("Magpie 还没有 Claude Desktop 配置，先在 Magpie 里接管一次", tone: .warning)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "交给 Magpie 接管？"
+        alert.informativeText = "Claude Desktop 会重新打开，网关改由 Magpie 的 agent 接管；cc-switch 的供应商记录会保留。"
+        alert.addButton(withTitle: "交给 Magpie")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        busy = true
+        spinner.startAnimation(nil)
+        status.set("正在交给 Magpie 接管…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try self.backend.claudeDesktopUseMagpie()
+                DispatchQueue.main.async {
+                    if let error = result.error, !error.isEmpty {
+                        self.finish(error: error)
+                    } else {
+                        let model = result.manager?.magpieModel.map { "（\($0)）" } ?? ""
+                        self.finishOk("✔ 已交给 Magpie 接管\(model)，Claude Desktop 已重新打开")
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { self.finish(error: error.localizedDescription) }
+            }
+        }
     }
 
     // MARK: - 表格
@@ -402,7 +666,11 @@ final class ClaudeProvidersPane: NSView, NSTableViewDataSource, NSTableViewDeleg
             trailing.append(PageChrome.tag(note, tint: .systemOrange))
         }
         if isCurrent {
-            trailing.append(PageChrome.tag("当前", tint: .controlAccentColor))
+            if mode == .desktop, desktopManager == "magpie" {
+                trailing.append(PageChrome.tag("cc-switch 记录"))
+            } else {
+                trailing.append(PageChrome.tag("当前", tint: .controlAccentColor))
+            }
         }
         var rowViews: [NSView] = [dot, texts]
         if !trailing.isEmpty {

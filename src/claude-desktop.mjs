@@ -8,6 +8,8 @@ import os from "node:os";
 import { dataFile, ccSwitchDbPath, ccSwitchSettingsPath } from "./paths.mjs";
 
 export const CLAUDE_DESKTOP_PROFILE_ID = "00000000-0000-4000-8000-000000157210";
+// Magpie 的 Claude Desktop 配置条目；id 后缀是 "magpie" 的十六进制。
+export const MAGPIE_PROFILE_ID = "00000000-0000-4000-8000-6d6167706965";
 const OFFICIAL_ID = "claude-desktop-official";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -265,6 +267,113 @@ export function applyClaudeDesktopProvider(provider) {
   return readAppliedProfile();
 }
 
+// ---------------------------------------------------------------------------
+// 接管方识别：Claude-3p 的 configLibrary/_meta.json 里 appliedId 指向谁，谁就在
+// 管理 Claude Desktop 的网关。cc-switch 和 Magpie 各写各的 profile，只翻这个指针。
+// ---------------------------------------------------------------------------
+
+function magpieConfigDir() {
+  return path.join(os.homedir(), ".config", "magpie");
+}
+
+export function magpieProfilePath() {
+  return path.join(claudeDesktopSupportDir(), "configLibrary", `${MAGPIE_PROFILE_ID}.json`);
+}
+
+/** 纯函数：从 _meta.json 判断接管方，方便单测。 */
+export function managerFromMeta(meta) {
+  const appliedId = typeof meta?.appliedId === "string" ? meta.appliedId : null;
+  const entries = Array.isArray(meta?.entries) ? meta.entries : [];
+  const entry = entries.find((item) => item?.id === appliedId) ?? null;
+  const name = typeof entry?.name === "string" && entry.name.trim() ? entry.name.trim() : null;
+
+  let manager = "unknown";
+  if (!appliedId) manager = "none";
+  else if (appliedId === CLAUDE_DESKTOP_PROFILE_ID) manager = "cc-switch";
+  else if (appliedId === MAGPIE_PROFILE_ID) manager = "magpie";
+  else if (name && /magpie/i.test(name)) manager = "magpie";
+  else if (name && /cc[\s-]?switch/i.test(name)) manager = "cc-switch";
+
+  return {
+    manager,
+    name: name ?? (appliedId ? "未知配置" : "未设置"),
+    appliedId,
+  };
+}
+
+export function isMagpieRunning() {
+  try {
+    const out = execFileSync("ps", ["-ax", "-o", "command="], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+    return out.split("\n").some((line) => /\/Applications\/magpie\.app\/Contents\/MacOS\/magpie(?:\s|$)/i.test(line));
+  } catch {
+    return false;
+  }
+}
+
+/** 当前是谁在接管 Claude Desktop（cc-switch / magpie / none / unknown）。 */
+export function detectClaudeDesktopManager() {
+  let meta = null;
+  try {
+    meta = readJson(metaPath());
+  } catch {
+    meta = null;
+  }
+  const base = managerFromMeta(meta);
+
+  let magpieAppliedAt = null;
+  try {
+    const applied = readJson(path.join(magpieConfigDir(), "applied.json"));
+    magpieAppliedAt = applied?.["claude-desktop"]?.at ?? null;
+  } catch {
+    magpieAppliedAt = null;
+  }
+
+  let magpieModel = null;
+  try {
+    const raw = readFileSync(path.join(magpieConfigDir(), "claude-desktop.model"), "utf8").trim();
+    magpieModel = raw || null;
+  } catch {
+    magpieModel = null;
+  }
+
+  return {
+    ...base,
+    magpieRunning: isMagpieRunning(),
+    magpieProfileExists: existsSync(magpieProfilePath()),
+    magpieModel,
+    magpieAppliedAt,
+    claudeRunning: mainClaudePids().length > 0,
+    entries: (Array.isArray(meta?.entries) ? meta.entries : [])
+      .filter((entry) => entry && typeof entry.id === "string")
+      .map((entry) => ({ id: entry.id, name: typeof entry.name === "string" ? entry.name : "" })),
+  };
+}
+
+/** 把 configLibrary 的指针交回 Magpie；只改 appliedId，不动任何密钥。 */
+export function applyMagpieProfile() {
+  const profile = magpieProfilePath();
+  if (!existsSync(profile)) {
+    throw new Error("没有找到 Magpie 的 Claude Desktop 配置；先在 Magpie 里启用一次 Claude Desktop 接管。");
+  }
+  let meta = { appliedId: MAGPIE_PROFILE_ID, entries: [] };
+  if (existsSync(metaPath())) {
+    try {
+      meta = readJson(metaPath());
+    } catch {
+      /* 损坏时重建 */
+    }
+  }
+  const entries = Array.isArray(meta.entries) ? meta.entries : [];
+  if (!entries.some((entry) => entry?.id === MAGPIE_PROFILE_ID)) {
+    entries.push({ id: MAGPIE_PROFILE_ID, name: "magpie" });
+  }
+  if (!entries.some((entry) => entry?.id === CLAUDE_DESKTOP_PROFILE_ID)) {
+    entries.push({ id: CLAUDE_DESKTOP_PROFILE_ID, name: "CC Switch" });
+  }
+  writeAtomic(metaPath(), `${JSON.stringify({ ...meta, appliedId: MAGPIE_PROFILE_ID, entries }, null, 2)}\n`);
+  return detectClaudeDesktopManager();
+}
+
 function followedStatePath() {
   return dataFile("claude-desktop-followed.json");
 }
@@ -327,6 +436,11 @@ function applyProxyProfile() {
 
 /** 以 cc-switch 的 currentProviderClaudeDesktop 为准，把桌面网关写成同一供应商。 */
 export async function syncDesktopFromCcSwitch({ log = console.log } = {}) {
+  const manager = detectClaudeDesktopManager();
+  if (manager.manager === "magpie") {
+    // Magpie 正在接管时不要自动抢回来，否则两边会互相覆盖、反复重启 Claude。
+    return { aligned: false, applied: false, reload: null, manager, reason: "Claude Desktop 正由 Magpie 接管，自动对齐已跳过" };
+  }
   const id = currentClaudeDesktopId();
   const providers = listClaudeDesktopProviders();
   const provider = providers.find((item) => item.id === id) ?? null;

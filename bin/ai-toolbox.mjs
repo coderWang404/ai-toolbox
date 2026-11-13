@@ -66,6 +66,8 @@ import {
   syncClaudeDesktopCurrent,
   readAppliedProfile,
   restartClaudeDesktop,
+  detectClaudeDesktopManager,
+  applyMagpieProfile,
 } from "../src/claude-desktop.mjs";
 import { syncClaudeRemotes } from "../src/claude-remote.mjs";
 import { installCcSwitchBinary, installCodexBinary } from "../src/remote-install.mjs";
@@ -80,8 +82,9 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox claude-current        查看 Claude Code 当前生效的配置
   ai-toolbox claude-switch <名称/ID>  切换 Claude Code 供应商并自动同步远端（--no-sync-remote 跳过）
   ai-toolbox cdesktop-list         列出 Claude Desktop 供应商
-  ai-toolbox cdesktop-current      查看 Claude Desktop 当前网关
-  ai-toolbox cdesktop-switch <名称/ID>  切换 Claude Desktop（写 Claude-3p 配置并重启应用）
+  ai-toolbox cdesktop-current      查看 Claude Desktop 当前网关与接管方（CC Switch / Magpie）
+  ai-toolbox cdesktop-switch <名称/ID>  切换 Claude Desktop（--force 覆盖 Magpie 接管）
+  ai-toolbox cdesktop-use-magpie   把 Claude Desktop 交回 Magpie 接管（--no-reload 不重启）
   ai-toolbox claude-sync-remote    把本机 Claude Code 配置同步到远程（只换 env）
   ai-toolbox reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
   ai-toolbox project-state         查看 Codex 项目状态是否被账号隔离寄存
@@ -831,21 +834,34 @@ async function cmdClaudeSwitch(query, opts) {
   };
 }
 
+function managerLabel(manager) {
+  if (!manager) return "未知";
+  if (manager.manager === "magpie") {
+    return `Magpie${manager.magpieRunning ? "（agent 运行中）" : ""}`;
+  }
+  if (manager.manager === "cc-switch") return "CC Switch";
+  if (manager.manager === "none") return "未设置";
+  return manager.name || "未知";
+}
+
 function cmdClaudeDesktopList(opts) {
   const providers = listClaudeDesktopProviders();
   const current = currentClaudeDesktopId();
+  const manager = detectClaudeDesktopManager();
   if (!opts.json) {
-    console.log(`\nClaude Desktop 供应商（共 ${providers.length} 个）:\n`);
+    console.log(`\nClaude Desktop 供应商（共 ${providers.length} 个）\n`);
+    console.log(`  接管方: ${managerLabel(manager)}${manager.magpieModel ? ` · ${manager.magpieModel}` : ""}\n`);
     for (const p of providers) {
       const mark = p.id === current ? "●" : "○";
       const mode = p.proxyMode ? "（走 cc-switch 代理）" : p.official ? "（官方）" : "";
       console.log(`  ${mark} ${p.name.padEnd(22)} ${(p.host ?? "-").padEnd(26)} ${mode}`);
     }
-    console.log("\n  切换: ai-toolbox cdesktop-switch <名称>");
+    console.log("\n  切换: ai-toolbox cdesktop-switch <名称>（Magpie 接管时加 --force）");
   }
   return {
     command: "cdesktop-list",
     currentId: current,
+    manager,
     providers: providers.map((p) => claudeDesktopSummary(p)),
     applied: readAppliedProfile(),
   };
@@ -855,26 +871,64 @@ function cmdClaudeDesktopCurrent(opts) {
   const applied = readAppliedProfile();
   const current = currentClaudeDesktopId();
   const provider = listClaudeDesktopProviders().find((p) => p.id === current) ?? null;
+  const manager = detectClaudeDesktopManager();
   if (!opts.json) {
-    opts.log(`\ncc-switch 记录: ${provider?.name ?? "(无)"}`);
+    opts.log(`\n当前接管: ${managerLabel(manager)}`);
+    if (manager.magpieModel) opts.log(`Magpie 模型: ${manager.magpieModel}`);
+    opts.log(`cc-switch 记录: ${provider?.name ?? "(无)"}`);
     opts.log(`实际网关: ${applied?.host ?? "-"}  ${applied ? `key …${applied.tokenTail ?? ""}` : ""}`);
-    if (applied && provider?.baseUrl && applied.baseUrl !== provider.baseUrl) opts.log("  ⚠️ 与 cc-switch 记录不一致");
+    if (manager.manager === "magpie") {
+      opts.log("  当前生效的是 Magpie 的配置；cc-switch 的记录只是下次切回时用。");
+    } else if (applied && provider?.baseUrl && applied.baseUrl !== provider.baseUrl) {
+      opts.log("  ⚠️ 与 cc-switch 记录不一致");
+    }
   }
-  return { command: "cdesktop-current", applied, provider: provider ? { id: provider.id, name: provider.name } : null };
+  return {
+    command: "cdesktop-current",
+    manager,
+    applied,
+    provider: provider ? { id: provider.id, name: provider.name } : null,
+  };
 }
 
 async function cmdClaudeDesktopSwitch(query, opts) {
   const provider = findClaudeDesktopProvider(query);
   if (!provider) throw new Error(`找不到 Claude Desktop 供应商「${query}」`);
+  const before = detectClaudeDesktopManager();
+  if (before.manager === "magpie" && !opts.force) {
+    throw new Error(
+      `Claude Desktop 现在由 Magpie 接管${before.magpieModel ? `（${before.magpieModel}）` : ""}。` +
+        "要改用 CC Switch 的供应商，请加 --force；这会中断 Magpie 的接管并重启 Claude Desktop。",
+    );
+  }
   const applied = applyClaudeDesktopProvider(provider);
   syncClaudeDesktopCurrent(provider.id);
   let reload = null;
   if (opts.reload) reload = await restartClaudeDesktop({ log: opts.log });
   if (!opts.json) {
+    if (before.manager === "magpie") opts.log(`\n  已从 Magpie 接管切回 CC Switch`);
     opts.log(`\n✔ 已切换到 ${provider.name}（${applied?.host ?? "-"}）`);
-    opts.log(`  skill ${reload ? "已重启 Claude Desktop" : "未重启，下次打开 Claude 生效"}`);
+    opts.log(`  ${reload ? "已重启 Claude Desktop" : "未重启，下次打开 Claude 生效"}`);
   }
-  return { command: "cdesktop-switch", provider: claudeDesktopSummary(provider), applied, reload };
+  return {
+    command: "cdesktop-switch",
+    provider: claudeDesktopSummary(provider),
+    applied,
+    reload,
+    previousManager: before.manager,
+    manager: detectClaudeDesktopManager(),
+  };
+}
+
+async function cmdClaudeDesktopUseMagpie(opts) {
+  const manager = applyMagpieProfile();
+  let reload = null;
+  if (opts.reload) reload = await restartClaudeDesktop({ log: opts.log });
+  if (!opts.json) {
+    opts.log(`\n✔ 已交给 Magpie 接管${manager.magpieModel ? `（${manager.magpieModel}）` : ""}`);
+    opts.log(`  ${reload ? "已重启 Claude Desktop" : "未重启，下次打开 Claude 生效"}`);
+  }
+  return { command: "cdesktop-use-magpie", manager, reload };
 }
 
 async function cmdClaudeSyncRemote(opts) {
@@ -1379,6 +1433,9 @@ async function main() {
     case "cdesktop-switch":
       if (!arg) throw new Error("用法: ai-toolbox cdesktop-switch <名称/ID>");
       result = await cmdClaudeDesktopSwitch(arg, opts);
+      break;
+    case "cdesktop-use-magpie":
+      result = await cmdClaudeDesktopUseMagpie(opts);
       break;
     case "claude-switch":
       if (!arg) throw new Error("用法: ai-toolbox claude-switch <名称/ID>");
