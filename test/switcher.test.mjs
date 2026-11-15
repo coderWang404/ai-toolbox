@@ -65,3 +65,54 @@ test("catalogHealth detects a missing model or unsupported effort", () => {
   assert.equal(catalogHealth(catalog, { model: "gpt-6.1-terra", requiredEffort: "high" }).ok, true);
   assert.equal(catalogHealth(catalog, { model: "gpt-6.1-sol" }).reason, "model-missing");
 });
+
+test("third-party provider config is normalized to requires_openai_auth=false", () => {
+  const provider = {
+    id: "p",
+    name: "Relay",
+    config: `model_provider = "p"
+model = "m"
+
+[model_providers.p]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+requires_openai_auth = true
+`,
+    auth: { OPENAI_API_KEY: "sk-relay" },
+    meta: {},
+  };
+  const { text, authNormalized } = buildProviderConfig({
+    provider,
+    commonConfig: null,
+    apiFormat: null,
+    liveConfigText: null,
+    dryRun: true,
+  });
+  assert.equal(authNormalized, true);
+  assert.match(text, /requires_openai_auth = false/);
+  assert.equal(/requires_openai_auth = true/.test(text), false);
+});
+
+test("official provider keeps its ChatGPT auth flag", () => {
+  const provider = {
+    id: "p",
+    name: "OpenAI",
+    config: `model_provider = "openai"
+model = "m"
+
+[model_providers.openai]
+base_url = "https://chatgpt.com/backend-api"
+requires_openai_auth = true
+`,
+    auth: {},
+    meta: {},
+  };
+  const { authNormalized } = buildProviderConfig({
+    provider,
+    commonConfig: null,
+    apiFormat: null,
+    liveConfigText: null,
+    dryRun: true,
+  });
+  assert.equal(authNormalized, false);
+});

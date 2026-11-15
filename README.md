@@ -93,6 +93,7 @@ ai-toolbox cdesktop-use-magpie     # 把 Claude Desktop 交回 Magpie 接管
 ai-toolbox reload                  # 只热重启（在 cc-switch 界面切换后用这个）
 ai-toolbox watch                   # 常驻监控：cc-switch 里一切换就自动热重启（推荐）
 ai-toolbox project-state           # 检查 Codex 项目列表是否被账号隔离寄存
+ai-toolbox provider-auth           # 检查当前供应商是否误用 ChatGPT 登录态（--fix 修复）
 ai-toolbox repair-projects         # 把被寄存的项目/会话归属恢复到 Codex（Codex 需退出）
 ai-toolbox sync-remote             # 把本机供应商同步到远程，并重启远程 app-server
 ai-toolbox remote-status           # 查看远程正在使用的供应商和密钥尾号
@@ -176,7 +177,28 @@ ai-toolbox project-state     # 先看是否被寄存（active / snapshots 数量
 ai-toolbox repair-projects   # Codex 完全退出后执行；--dry-run 只预览
 ```
 
-## 切换后看不到新供应商的模型？已内置补齐
+## 切第三方后远端对话消失？`requires_openai_auth` 守卫
+
+Codex 把第三方供应商的 `requires_openai_auth = true` 解释成「这个供应商使用 ChatGPT 登录态」：
+
+- app-server 的 `account/read` 会返回 ChatGPT 账号（planType / workspaceName / workspaceRouting）；
+- 桌面端身份从 `signed-out` 变成 `sha256([userId, accountId])`；
+- 侧边栏状态（远端 SSH 对话、项目展开、最近文件）按身份分区存放，身份一换就读不到，
+  看起来就是「对话被隐藏了」；
+- bearer token 一旦缺失，请求还会回落到 ChatGPT 的 OAuth token 并打到中转站的 base_url。
+
+cc-switch 自己记录的第三方供应商是 `false`，但通过界面/手工改过的配置不一定。本工具统一处理：
+
+- `switch` 写配置时把第三方供应商强制归一成 `false`（官方保留 id 和真正连 OpenAI 后端的供应商不动）；
+- `reload`（含桌面 App 的配置监听、cc-switch 界面切换后自动跟随）在重启前体检并修复；
+- 只有供应商自带凭证（bearer / env_key / auth 段 / Authorization 头）时才自动改，
+  避免把「靠 ChatGPT 登录的中转」改坏。
+
+```bash
+ai-toolbox provider-auth          # 只体检
+ai-toolbox provider-auth --fix    # 修正后重启 Codex 生效
+```
+
 
 cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面端就只能显示内置模型列表，
 切过去后模型选择器里没有（或选不到）新供应商真实可用的模型。

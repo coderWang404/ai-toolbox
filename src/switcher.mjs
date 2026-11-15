@@ -7,7 +7,12 @@ import {
   ccSwitchCatalogPath,
   CHATGPT_CODEX_BIN,
 } from "./paths.mjs";
-import { injectBearerToken, setCatalogJsonField, catalogJsonValue } from "./toml-edit.mjs";
+import {
+  injectBearerToken,
+  setCatalogJsonField,
+  catalogJsonValue,
+  forceProviderAuthLocal,
+} from "./toml-edit.mjs";
 import { mergeCommonConfig, isCommonConfigSubset, extractSections, stripSections } from "./common-config.mjs";
 import { buildCatalog } from "./catalog.mjs";
 import { fetchProviderModels, buildCatalogFromModelIds, loadReferenceModels } from "./model-catalog.mjs";
@@ -86,7 +91,19 @@ export function buildProviderConfig({ provider, commonConfig, apiFormat, liveCon
       : null;
   if (token) text = injectBearerToken(text, token);
 
-  // 3. 模型目录
+  // 3. 第三方供应商固定关闭 OpenAI 登录态路由：
+  //    requires_openai_auth=true 会让 account/read 返回 ChatGPT 账号，
+  //    桌面端身份从 signed-out 切到账号命名空间，远端对话/侧边栏状态按身份寄存后"消失"。
+  let authNormalized = false;
+  if (token) {
+    const fixed = forceProviderAuthLocal(text);
+    if (fixed.changed) {
+      text = fixed.text;
+      authNormalized = true;
+    }
+  }
+
+  // 4. 模型目录
   const catalog = buildCatalog({
     settings: { modelCatalog: provider.modelCatalog },
     configText: text,
@@ -100,7 +117,7 @@ export function buildProviderConfig({ provider, commonConfig, apiFormat, liveCon
     text = setCatalogJsonField(text, false);
   }
 
-  return { text, catalog };
+  return { text, catalog, authNormalized };
 }
 
 /** 从 TOML 文本里取顶层键值（顶层键在 cc-switch 产物里都从第 0 列开始）。 */
@@ -257,7 +274,7 @@ export async function switchProvider({
   const startedAt = Date.now();
 
   const liveConfigText = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
-  let { text, catalog } = buildProviderConfig({
+  let { text, catalog, authNormalized } = buildProviderConfig({
     provider,
     commonConfig,
     apiFormat,
@@ -302,6 +319,9 @@ export async function switchProvider({
   }
 
   log(`  目标供应商: ${provider.name} (${provider.id})`);
+  if (authNormalized) {
+    log("  已修正 requires_openai_auth → false（第三方供应商不再借用 ChatGPT 登录态）");
+  }
   if (modelCount > 0) {
     const source = catalogSource === "provider" ? "供应商 /models" : "cc-switch 配置";
     log(`  模型目录: ${modelCount} 个模型（来源: ${source}）`);
@@ -392,6 +412,14 @@ export async function switchProvider({
     } else {
       log(`  bearer token: 已生效 ✔`);
     }
+  }
+
+  // 第三方供应商不能要求 OpenAI 登录态（true 会把账号身份和请求路由一起带进来）
+  if (providerTable && providerTable.requires_openai_auth === true) {
+    warnings.push(
+      "生效配置里 requires_openai_auth 仍为 true：Codex 会把 ChatGPT 登录态挂到这个供应商上，" +
+        "账号菜单会显示 ChatGPT 账号，signed-out 命名空间下的侧边栏状态（远端对话等）会被隐藏",
+    );
   }
 
   // 校验 model 与供应商声明一致

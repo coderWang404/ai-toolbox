@@ -270,6 +270,101 @@ export function injectBearerToken(text, token) {
   return changed ? lines.join("\n") : text;
 }
 
+/**
+ * 读当前供应商表的鉴权字段。
+ * requiresOpenaiAuth=true 表示 Codex 会把 ChatGPT 登录态挂到这个供应商上：
+ * app-server 的 account/read 会返回账号（planType/workspaceName），桌面端身份随之
+ * 从 signed-out 变成 sha256([userId, accountId])，按身份寄存的侧边栏状态（远端对话、
+ * 项目展开、最近文件）就"消失"了；部分请求还会走 chatgpt.com 后端。
+ */
+export function providerAuthState(text) {
+  const providerId = activeProviderId(text);
+  if (!providerId) return null;
+  const lines = text.split(/\r?\n/);
+  const headers = sectionHeaderIndices(lines, providerSectionPath(providerId));
+  if (!headers.length) return null;
+  const headerIdx = headers[0];
+  const valueOf = (key) => {
+    const idx = directKeyLines(lines, headerIdx, key)[0];
+    if (idx === undefined) return null;
+    const raw = lines[idx].slice(lines[idx].indexOf("=") + 1).trim();
+    const quoted = raw.match(/^"((?:[^"\\]|\\.)*)"/);
+    if (quoted) return quoted[1].replace(/\\"/g, '"');
+    return raw.replace(/\s+#.*$/, "");
+  };
+  const auth = valueOf("requires_openai_auth");
+  const baseUrl = valueOf("base_url");
+  const hasTableKey = (key) => directKeyLines(lines, headerIdx, key).length > 0;
+  const hasOwnAuth =
+    hasTableKey("env_key") ||
+    hasTableKey("auth") ||
+    hasTableKey("aws") ||
+    hasTableKey("http_headers") ||
+    hasTableKey("env_http_headers");
+  return {
+    providerId,
+    reserved: RESERVED_PROVIDER_IDS.has(providerId),
+    name: valueOf("name"),
+    baseUrl,
+    requiresOpenaiAuth: auth === "true",
+    hasBearerToken: Boolean(valueOf("experimental_bearer_token")),
+    hasOwnAuth,
+    openAiBackend: isOpenAiBackendUrl(baseUrl),
+  };
+}
+
+/**
+ * 供应商是否真的连 OpenAI / ChatGPT 后端。
+ * 只有这种供应商才应该借用 ChatGPT 登录态（requires_openai_auth = true）；
+ * 任何第三方中转都不该借用。
+ */
+export function isOpenAiBackendUrl(baseUrl) {
+  if (!baseUrl) return false;
+  let host;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    const m = String(baseUrl).match(/^[a-z]+:\/\/([^/:?#]+)/i);
+    host = m ? m[1].toLowerCase() : String(baseUrl).toLowerCase();
+  }
+  return host === "chatgpt.com" || host.endsWith(".chatgpt.com") || host === "chatgpt.ai" || host === "openai.com" || host.endsWith(".openai.com");
+}
+
+/**
+ * 第三方供应商必须 requires_openai_auth = false，否则 ChatGPT 登录态会被带进来
+ * （账号菜单显示 team、signed-out 命名空间下的侧边栏状态全部隐藏）。
+ * 官方供应商的保留 id、以及真的连 OpenAI 后端的供应商不动。
+ */
+export function forceProviderAuthLocal(text) {
+  const state = providerAuthState(text);
+  if (!state || state.reserved) return { text, changed: false };
+  if (isOpenAiBackendUrl(state.baseUrl)) return { text, changed: false };
+
+  const lines = text.split(/\r?\n/);
+  const headers = sectionHeaderIndices(lines, providerSectionPath(state.providerId));
+  if (!headers.length) return { text, changed: false };
+
+  let changed = false;
+  for (const headerIdx of headers) {
+    const existing = directKeyLines(lines, headerIdx, "requires_openai_auth");
+    if (existing.length) {
+      for (const idx of existing) {
+        if (/^\s*requires_openai_auth\s*=\s*false\s*$/i.test(lines[idx])) continue;
+        const indent = lines[idx].match(/^\s*/)[0];
+        lines[idx] = `${indent}requires_openai_auth = false`;
+        changed = true;
+      }
+      continue;
+    }
+    const end = directBodyEnd(lines, headerIdx);
+    let insertAt = end;
+    while (insertAt > headerIdx + 1 && isCommentOrBlank(lines[insertAt - 1])) insertAt--;
+    lines.splice(insertAt, 0, "requires_openai_auth = false");
+    changed = true;
+  }
+  return { text: changed ? lines.join("\n") : text, changed };
+}
+
 function catalogValue(lines, idx) {
   const raw = lines[idx].slice(lines[idx].indexOf("=") + 1).trim();
   if (raw.startsWith('"')) {

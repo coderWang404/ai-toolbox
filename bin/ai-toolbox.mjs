@@ -55,6 +55,7 @@ import {
   projectStateReport,
 } from "../src/codex-project-state.mjs";
 import { ensureAuthPreserved } from "../src/codex-auth.mjs";
+import { guardProviderAuth, inspectProviderAuth, explainProviderAuth } from "../src/codex-provider-guard.mjs";
 import { probeRemotes, latestVersions, planUpdates, updateHost, localApplications } from "../src/remote-versions.mjs";
 import { listClaudeProviders, getCurrentClaudeProvider, switchClaudeProvider, claudeStatus } from "../src/claude-code.mjs";
 import {
@@ -88,6 +89,7 @@ const HELP = `ai-toolbox — 不重启 Codex，热切换第三方模型供应商
   ai-toolbox claude-sync-remote    把本机 Claude Code 配置同步到远程（只换 env）
   ai-toolbox reload                仅热重启 app-server（常用于 cc-switch 界面切换后）
   ai-toolbox project-state         查看 Codex 项目状态是否被账号隔离寄存
+  ai-toolbox provider-auth         检查当前供应商是否误用 ChatGPT 登录态（true 会隐藏远端对话）
   ai-toolbox repair-projects       把被寄存的项目/会话归属恢复到 Codex 界面（Codex 需退出）
   ai-toolbox watch                 持续监控配置，切换后自动热重启（推荐常驻）
   ai-toolbox sync-remote           把本机供应商配置同步到远程 Codex，并重启远程 app-server
@@ -546,6 +548,10 @@ async function cmdReload(opts) {
   };
   phase("备份 Codex 项目状态");
   const preserved = preserveProjectState({ log });
+  phase("检查供应商鉴权");
+  // 先修配置再重启：requires_openai_auth=true 会让重启后的 app-server
+  // 以 ChatGPT 账号身份启动，按身份寄存的侧边栏状态（远端对话）就看不到。
+  const providerAuth = guardProviderAuth({ fix: true, log });
   phase("检查 ChatGPT 登录态");
   const authState = ensureAuthPreserved({ log });
   let lastStamp = Date.now();
@@ -579,6 +585,7 @@ async function cmdReload(opts) {
     remote,
     preserved,
     projectState,
+    providerAuth,
     catalogState,
     authState,
     timings: { ...timings, total: Date.now() - startedAt },
@@ -609,6 +616,44 @@ async function cmdProjectState(opts) {
     );
   }
   return report;
+}
+
+async function cmdProviderAuth(opts) {
+  const guarded = opts.fix
+    ? guardProviderAuth({ fix: true, log: opts.json ? null : opts.log })
+    : inspectProviderAuth();
+  const fixedNow = opts.fix && guarded.changed;
+  // 展示改完后的真实状态，但结论按修复前的判定来给
+  const result = { ...guarded, ...(fixedNow ? inspectProviderAuth() : {}), fixed: guarded.fixed, changed: guarded.changed };
+  if (!opts.json) {
+    if (!result.ok) {
+      opts.log(`\n⚠️  无法检查供应商鉴权: ${result.reason}`);
+      return { command: "provider-auth", ...result };
+    }
+    const p = result.provider;
+    opts.log(`\n当前供应商: ${p.name ?? p.providerId} (${p.providerId})`);
+    opts.log(`  base_url: ${p.baseUrl ?? "未设置"}`);
+    opts.log(`  requires_openai_auth: ${p.requiresOpenaiAuth ? "true" : "false"}`);
+    opts.log(`  bearer token: ${p.hasBearerToken ? "已配置" : "未配置"}`);
+    opts.log(`  ${explainProviderAuth(p)}`);
+    if (fixedNow) {
+      opts.log("\n✅ 已修正为 false；重启 Codex 后生效（ai-toolbox reload 会自动重启）。");
+    } else if (guarded.blocked) {
+      opts.log(
+        "\n⚠️  这个供应商没有自带凭证，requires_openai_auth=true 未自动修改；" +
+          "如果它确实靠 ChatGPT 登录，请保持现状。",
+      );
+    } else if (guarded.needsFix) {
+      opts.log(
+        "\n⚠️  这行会让 Codex 借用 ChatGPT 登录身份，按身份寄存的侧边栏状态（远端对话等）会读不到。\n   修复: ai-toolbox provider-auth --fix",
+      );
+    } else if (p.reserved) {
+      opts.log("\n✅ 官方供应商，保持 ChatGPT 登录态。");
+    } else {
+      opts.log("\n✅ 第三方供应商没有借用 ChatGPT 登录态。");
+    }
+  }
+  return { command: "provider-auth", ...result };
 }
 
 function cmdRepairProjects(opts) {
@@ -1278,6 +1323,7 @@ async function main() {
       drain: { type: "string" },
       hard: { type: "boolean", default: false },
       force: { type: "boolean", default: false },
+      fix: { type: "boolean", default: false },
       "no-reload": { type: "boolean", default: false },
       "no-remote": { type: "boolean", default: false },
       "no-model-probe": { type: "boolean", default: false },
@@ -1331,6 +1377,7 @@ async function main() {
     progress,
     hard: values.hard,
     force: values.force,
+    fix: values.fix,
     dryRun: values["dry-run"],
     secrets: values["with-secrets"],
     focus: values["no-focus"] ? false : values.focus !== false,
@@ -1408,6 +1455,9 @@ async function main() {
       break;
     case "project-state":
       result = await cmdProjectState(opts);
+      break;
+    case "provider-auth":
+      result = await cmdProviderAuth(opts);
       break;
     case "repair-projects":
       result = cmdRepairProjects(opts);
