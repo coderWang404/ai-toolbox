@@ -48,3 +48,57 @@ base_url = "https://new.example/v1"
   assert.match(result.text, /\[projects\."\/tmp\/x"\]/);
   assert.equal(result.changed, true);
 });
+
+test("managed catalog pointer is translated to a remote-relative filename", () => {
+  const remote = `model_provider = "old"
+model = "old-model"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.old]
+name = "Old"
+`;
+  const local = `model_provider = "new"
+model = "new-model"
+model_catalog_json = "/Users/MacBook/.codex/cc-switch-model-catalog.json"
+
+[model_providers.new]
+name = "New"
+base_url = "https://new.example/v1"
+`;
+  const { text } = applyProviderSlice(remote, local);
+  assert.match(text, /model_catalog_json = "cc-switch-model-catalog\.json"/);
+  assert.equal(text.includes("/Users/MacBook"), false);
+});
+
+test("catalog pointer inserted when remote has none", () => {
+  const remote = `model_provider = "old"
+model = "old-model"
+`;
+  const local = `model_provider = "new"
+model = "new-model"
+model_catalog_json = "/home/someone/.codex/cc-switch-model-catalog.json"
+
+[model_providers.new]
+name = "New"
+base_url = "https://new.example/v1"
+`;
+  const { text } = applyProviderSlice(remote, local);
+  assert.match(text, /model_catalog_json = "cc-switch-model-catalog\.json"/);
+  assert.equal(text.includes("/home/someone"), false);
+});
+
+test("a user-managed catalog path is left untouched", () => {
+  const remote = `model_provider = "old"
+model = "old-model"
+`;
+  const local = `model_provider = "new"
+model = "new-model"
+model_catalog_json = "/Users/MacBook/.codex/my-own-catalog.json"
+
+[model_providers.new]
+name = "New"
+base_url = "https://new.example/v1"
+`;
+  const { text } = applyProviderSlice(remote, local);
+  assert.match(text, /model_catalog_json = "\/Users\/MacBook\/\.codex\/my-own-catalog\.json"/);
+});

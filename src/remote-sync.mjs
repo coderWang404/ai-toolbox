@@ -181,13 +181,32 @@ function ensureTrailingNewline(text) {
 }
 
 /**
+ * 本机的 model_catalog_json 可能被写成绝对路径（Codex 或 cc-switch 会这么做）。
+ * 远端没有 /Users/... 这种路径，照抄会让 Codex 直接拒绝加载整份 config。
+ * 托管目录统一翻译成相对文件名，远端解析到自己的 CODEX_HOME。
+ */
+function remoteCatalogPointer(line) {
+  const m = line.match(/^\s*model_catalog_json\s*=\s*"((?:[^"\\]|\\.)*)"/);
+  if (!m) return line;
+  const value = m[1].replace(/\\\\/g, "\\");
+  const base = value.split(/[\\/]/).pop();
+  if (base !== CATALOG_FILENAME) return line;
+  return `model_catalog_json = "${CATALOG_FILENAME}"`;
+}
+
+/**
  * 用本机配置里的供应商字段覆盖远程配置，其余 section 原样保留。
  * @returns {{text: string, changed: boolean, baseUrl: string|null, previousBaseUrl: string|null}}
  */
 export function applyProviderSlice(remoteText, localText) {
   const local = splitToml(localText);
   const remote = splitToml(remoteText ?? "");
-  const localTop = topAssignments(local.preamble);
+  const localTopRaw = topAssignments(local.preamble);
+  // 目录指针按“远端可用”来写，不能照抄本机绝对路径
+  const localTop = new Map(localTopRaw);
+  if (localTop.has("model_catalog_json")) {
+    localTop.set("model_catalog_json", remoteCatalogPointer(localTop.get("model_catalog_json")));
+  }
   const previousBaseUrl = baseUrlOf(remoteText ?? "");
 
   const preamble = [];
@@ -344,25 +363,73 @@ m = re.search(r'^\\s*base_url\\s*=\\s*"([^"]+)"', previous, re.M)
 if m:
     old_url = m.group(1)
 restarted = 0
-if changed and not dry:
+catalog_fixed = False
+if not dry:
+    need = len(cfg_bytes) + 65536
+    if catalog_b64:
+        need += (len(catalog_b64) * 3) // 4
+    try:
+        probe = home if home.exists() else home.parent
+        st = os.statvfs(str(probe))
+        free = st.f_bavail * st.f_frsize
+    except OSError:
+        free = None
+    if free is not None and free < need:
+        print("CODEX_SYNC_JSON:" + json.dumps({"error": "disk-full", "freeBytes": free, "needBytes": need}))
+        sys.exit(0)
+
     home.mkdir(parents=True, exist_ok=True)
-    if cfg.exists():
-        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
-        backup = cfg.with_name(cfg.name + ".bak_" + stamp)
-        backup.write_bytes(cfg.read_bytes())
-        try:
-            os.chmod(backup, 0o600)
-        except OSError:
-            pass
-    tmp = cfg.with_name(cfg.name + ".tmp")
-    tmp.write_text(new_text, encoding="utf-8")
-    os.chmod(tmp, 0o600)
-    tmp.replace(cfg)
     if catalog_b64 and catalog_name:
         data = base64.b64decode(catalog_b64)
         target = home / catalog_name
-        target.write_bytes(data)
-        os.chmod(target, 0o600)
+        cat_tmp = target.with_name(target.name + ".tmp")
+        cat_tmp.write_bytes(data)
+        os.chmod(cat_tmp, 0o600)
+        cat_tmp.replace(target)
+
+    backup_done = False
+    def backup_cfg():
+        global backup_done
+        if backup_done or not cfg.exists():
+            return
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+        b = cfg.with_name(cfg.name + ".bak_" + stamp)
+        b.write_bytes(cfg.read_bytes())
+        try:
+            os.chmod(b, 0o600)
+        except OSError:
+            pass
+        backup_done = True
+
+    if changed:
+        backup_cfg()
+        tmp = cfg.with_name(cfg.name + ".tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        tmp.replace(cfg)
+
+    # 兜底：目录指针必须指向远端真实存在的文件，否则 Codex 拒绝加载整份配置
+    if cfg.exists():
+        text_now = cfg.read_text(encoding="utf-8")
+        m = re.search(r'^\\s*model_catalog_json\\s*=\\s*"([^"]+)"', text_now, re.M)
+        if m:
+            target = pathlib.Path(m.group(1)).expanduser()
+            if not target.is_absolute():
+                target = home / target
+            if not target.exists():
+                candidate = (home / catalog_name) if catalog_name else None
+                if candidate is not None and candidate.exists():
+                    repl = '"' + catalog_name + '"'
+                    text_now = re.sub(r'^(\\s*model_catalog_json\\s*=\\s*)"[^"]*"', lambda mm: mm.group(1) + repl, text_now, flags=re.M)
+                else:
+                    text_now = re.sub(r'^\\s*model_catalog_json\\s*=\\s*"[^"]*"\\n?', "", text_now, flags=re.M)
+                backup_cfg()
+                fix_tmp = cfg.with_name(cfg.name + ".tmp")
+                fix_tmp.write_text(text_now, encoding="utf-8")
+                os.chmod(fix_tmp, 0o600)
+                fix_tmp.replace(cfg)
+                changed = True
+                catalog_fixed = True
 if changed and not dry:
     me = os.environ.get("USER") or ""
     try:
@@ -403,7 +470,7 @@ if changed and not dry:
         except ProcessLookupError:
             pass
     restarted = len(pids)
-print("CODEX_SYNC_JSON:" + json.dumps({"changed": changed, "restarted": restarted, "previousBaseUrl": old_url, "dryRun": dry}))
+print("CODEX_SYNC_JSON:" + json.dumps({"changed": changed, "restarted": restarted, "previousBaseUrl": old_url, "dryRun": dry, "catalogFixed": catalog_fixed}))
 `;
 }
 
@@ -462,6 +529,10 @@ async function pushHost(entry, content, catalog, dryRun, { includeSecrets = fals
     const line = stdout.split("\n").map((item) => item.trim()).find((item) => item.startsWith("CODEX_SYNC_JSON:"));
     if (!line) throw new Error(stdout.trim().slice(-180) || "远程没有返回结果");
     const parsed = JSON.parse(line.slice("CODEX_SYNC_JSON:".length));
+    if (parsed.error === "disk-full") {
+      const free = typeof parsed.freeBytes === "number" ? `${(parsed.freeBytes / 1024 / 1024).toFixed(1)} MB` : "未知";
+      return emptyHost(entry, `远程磁盘已满（可用 ${free}，写入需要 ${Math.ceil((parsed.needBytes ?? 0) / 1024)} KB），未改动配置`);
+    }
     const snap = providerSnapshot(content, { includeSecrets });
     return {
       host: entry.host,
