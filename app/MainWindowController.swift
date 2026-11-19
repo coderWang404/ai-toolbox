@@ -84,6 +84,8 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
     private var ccSwitchPending = Set<String>()
     private var ccSwitchAttempts: [String: Int] = [:]
     private var ccSwitchBootstrapped = false
+    /// cc-switch 数据库最近一次写入的指纹（mtime+size），没变就不启动 CLI 去算哈希。
+    private var ccSwitchDbStamp: String?
     private var ccSwitchLastAttempt = Date.distantPast
     private var ccSwitchRunning = false
     private var iqProviders: [IqProvider] = []
@@ -2086,21 +2088,32 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
             setCcStatus("没有启用的远程机器")
             return
         }
-        let previous = ccSwitchHash
+        let stamp = ccSwitchDbStampNow()
+        let stampChanged = stamp != ccSwitchDbStamp
         let bootstrapped = ccSwitchBootstrapped
         let pending = ccSwitchPending
         let lastAttempt = ccSwitchLastAttempt
+        let retryDue = !pending.isEmpty && Date().timeIntervalSince(lastAttempt) > 8
+        // 数据库没动、不是首次、也没有待重试的主机时，直接跳过；
+        // 避免每 1.5 秒启动一次 Node 进程去算哈希（实测每次 ~0.3 秒 CPU）。
+        guard force || stampChanged || !bootstrapped || retryDue else { return }
+        let previous = ccSwitchHash
         ccSwitchBusy = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             guard let hash = try? self.backend.ccSwitchFingerprint() else {
-                DispatchQueue.main.async { self.ccSwitchBusy = false }
+                DispatchQueue.main.async {
+                    self.ccSwitchBusy = false
+                    self.ccSwitchDbStamp = stamp
+                }
                 return
             }
             let localChanged = hash != previous
-            let retryDue = !pending.isEmpty && Date().timeIntervalSince(lastAttempt) > 8
             guard localChanged || !bootstrapped || retryDue else {
-                DispatchQueue.main.async { self.ccSwitchBusy = false }
+                DispatchQueue.main.async {
+                    self.ccSwitchBusy = false
+                    self.ccSwitchDbStamp = stamp
+                }
                 return
             }
             let onlyPending = !localChanged && bootstrapped
@@ -2109,15 +2122,31 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
                 let stable = try self.backend.ccSwitchFingerprint()
                 let result = try self.backend.syncCcSwitch(hosts: onlyPending ? Array(pending) : nil)
                 DispatchQueue.main.async {
+                    self.ccSwitchDbStamp = stamp
                     self.applyCcSwitchResult(result, hash: stable, replacePending: !onlyPending)
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.ccSwitchBusy = false
                     self.ccSwitchLastAttempt = Date()
+                    self.ccSwitchDbStamp = stamp
                 }
             }
         }
+    }
+
+    /// cc-switch 数据库（含 WAL）的 mtime+size，用来判断有没有写入。
+    private func ccSwitchDbStampNow() -> String {
+        let paths = [
+            NSString(string: "~/.cc-switch/cc-switch.db").expandingTildeInPath,
+            NSString(string: "~/.cc-switch/cc-switch.db-wal").expandingTildeInPath,
+        ]
+        return paths.map { path -> String in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let date = attrs[.modificationDate] as? Date,
+                  let size = attrs[.size] as? NSNumber else { return "-" }
+            return "\(date.timeIntervalSince1970)-\(size)"
+        }.joined(separator: "|")
     }
 
     private func applyCcSwitchResult(_ result: CcSwitchSyncResult, hash: String, replacePending: Bool) {

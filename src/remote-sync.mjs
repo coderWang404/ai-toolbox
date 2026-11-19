@@ -434,6 +434,9 @@ function probeArgs(entry, host, seconds) {
     `ConnectTimeout=${seconds}`,
     "-o",
     "StrictHostKeyChecking=accept-new",
+    // 探测的是这条地址本身；ssh config 里的双地址 fallback 留给真正的操作
+    "-o",
+    "ProxyCommand=none",
   ];
   if (entry.port) args.push("-p", String(entry.port));
   if (entry.identityFile) {
@@ -529,10 +532,15 @@ if not dry:
     if catalog_b64 and catalog_name:
         data = base64.b64decode(catalog_b64)
         target = home / catalog_name
-        cat_tmp = target.with_name(target.name + ".tmp")
-        cat_tmp.write_bytes(data)
-        os.chmod(cat_tmp, 0o600)
-        cat_tmp.replace(target)
+        try:
+            same = target.exists() and target.read_bytes() == data
+        except OSError:
+            same = False
+        if not same:
+            cat_tmp = target.with_name(target.name + ".tmp")
+            cat_tmp.write_bytes(data)
+            os.chmod(cat_tmp, 0o600)
+            cat_tmp.replace(target)
 
     backup_done = False
     def backup_cfg():
