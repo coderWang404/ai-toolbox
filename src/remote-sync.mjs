@@ -3,7 +3,7 @@
 // 远程自己的项目路径、桌面设置、notify、MCP 保持不动。
 // SSH 登录走本机 ~/.ssh/config（User + IdentityFile），不在这里保存密码。
 import { execFile, spawn } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,40 @@ const SYNC_TOP_KEYS = [
 ];
 
 const CATALOG_FILENAME = "cc-switch-model-catalog.json";
+
+// 同一台物理机的两套地址：内网 IP ↔ EasyTier 虚拟 IP。
+// 与 easytier-hosts 技能一致（230 的 EasyTier 10.126.126.5 由现网实测补入）。
+const DUAL_ADDRESSES = {
+  "183.175.14.231": ["10.126.126.2"],
+  "183.175.14.217": ["10.126.126.3"],
+  "183.175.14.219": ["10.126.126.4"],
+  "183.175.14.230": ["10.126.126.5"],
+};
+
+/** 某台机器的全部候选地址（主地址在前）。 */
+export function candidateHosts(entry) {
+  const list = [entry.host, ...(entry.altHosts ?? [])];
+  return [...new Set(list.filter(Boolean))];
+}
+
+/** 跨地址识别同一台机器，避免把 217 和 10.126.126.3 当成两台。 */
+export function machineIdentity(host) {
+  for (const [lan, alts] of Object.entries(DUAL_ADDRESSES)) {
+    if (host === lan || alts.includes(host)) return lan;
+  }
+  return host;
+}
+
+/** 补齐已知机器的另一套地址。 */
+function withDualAddresses(host, altHosts) {
+  const owner = machineIdentity(host);
+  const pool = [owner, ...(DUAL_ADDRESSES[owner] ?? [])];
+  const alts = [...altHosts];
+  for (const candidate of pool) {
+    if (candidate !== host && !alts.includes(candidate)) alts.push(candidate);
+  }
+  return alts;
+}
 
 function hereDir() {
   return path.dirname(fileURLToPath(import.meta.url));
@@ -55,7 +89,17 @@ function safeSshField(value) {
 export function normalizeHost(item, builtin = false) {
   if (typeof item === "string") {
     const host = safeSshField(item);
-    return host ? { host, label: host, user: null, port: null, identityFile: null, builtin } : null;
+    return host
+      ? {
+          host,
+          label: host,
+          user: null,
+          port: null,
+          identityFile: null,
+          altHosts: withDualAddresses(host, []),
+          builtin,
+        }
+      : null;
   }
   if (!item || typeof item !== "object") return null;
   const host = safeSshField(item.host ?? item.hostname ?? "");
@@ -64,33 +108,41 @@ export function normalizeHost(item, builtin = false) {
   const user = item.user ? safeSshField(item.user) : null;
   if (item.user && !user) return null;
   const identityFile = item.identityFile ? String(item.identityFile).trim() : "";
+  const extraAlts = Array.isArray(item.altHosts)
+    ? item.altHosts.map((value) => safeSshField(value)).filter(Boolean)
+    : [];
   return {
     host,
     label: String(item.label ?? host).trim() || host,
     user: user || null,
     port: Number.isInteger(port) && port > 0 && port < 65536 ? port : null,
     identityFile: identityFile || null,
+    altHosts: withDualAddresses(host, extraAlts.filter((value) => value !== host)),
     builtin,
   };
 }
 
-/** 内置列表减去用户关闭的机器，再加上用户添加且启用的机器。同主机不重复。 */
+/** 内置列表减去用户关闭的机器，再加上用户添加且启用的机器。同一台机器不重复。 */
 export function mergeRemotes(builtinItems, userData) {
   const disabled = new Set((userData?.disabled ?? []).map((item) => String(item)));
   const merged = [];
   const seen = new Set();
   for (const item of builtinItems) {
     const host = normalizeHost(item, true);
-    if (!host || disabled.has(host.host) || seen.has(host.host)) continue;
+    if (!host || disabled.has(host.host)) continue;
+    const identity = machineIdentity(host.host);
+    if (seen.has(identity)) continue;
     merged.push(host);
-    seen.add(host.host);
+    seen.add(identity);
   }
   for (const item of userData?.hosts ?? []) {
     if (item?.enabled === false) continue;
     const host = normalizeHost(item, false);
-    if (!host || seen.has(host.host)) continue;
+    if (!host) continue;
+    const identity = machineIdentity(host.host);
+    if (seen.has(identity)) continue;
     merged.push(host);
-    seen.add(host.host);
+    seen.add(identity);
   }
   return merged;
 }
@@ -293,6 +345,7 @@ function emptyHost(entry, error) {
   return {
     host: entry.host,
     label: entry.label,
+    resolvedHost: entry.resolvedHost ?? null,
     ok: false,
     changed: false,
     baseUrl: null,
@@ -327,13 +380,22 @@ async function readRemoteConfig(entry) {
 }
 
 export function sshArgs(entry, program) {
-  const host = safeSshField(entry.host);
+  const host = safeSshField(entry.resolvedHost ?? entry.host);
   const user = entry.user ? safeSshField(entry.user) : null;
   if (!host || (entry.user && !user)) {
     throw new Error(`远程主机名不合法: ${entry.host}`);
   }
   const payload = Buffer.from(program, "utf8").toString("base64");
-  const args = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12"];
+  const args = [
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=12",
+    // 双地址切换后第一次连接的是新地址，自动接受新主机的 key（已存在的不覆盖）
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+  ];
   if (entry.port) args.push("-p", String(entry.port));
   if (entry.identityFile) {
     args.push("-i", expandHome(entry.identityFile), "-o", "IdentitiesOnly=yes");
@@ -342,6 +404,91 @@ export function sshArgs(entry, program) {
   args.push(target, `python3 -c "import base64; exec(base64.b64decode('${payload}'))"`);
   return args;
 }
+
+const ROUTE_CACHE_TTL = 10 * 60 * 1000;
+
+function routeCachePath() {
+  return dataFile("remote-route.json");
+}
+
+function readRouteCache() {
+  return readJson(routeCachePath()) ?? {};
+}
+
+function writeRouteCache(map) {
+  try {
+    writeFileSync(routeCachePath(), `${JSON.stringify(map, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // 缓存写不进去只影响下次探测速度，不影响同步
+  }
+}
+
+function probeArgs(entry, host, seconds) {
+  const user = entry.user ? safeSshField(entry.user) : null;
+  if (entry.user && !user) throw new Error(`远程用户名不合法: ${entry.user}`);
+  const args = [
+    "-T",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    `ConnectTimeout=${seconds}`,
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+  ];
+  if (entry.port) args.push("-p", String(entry.port));
+  if (entry.identityFile) {
+    args.push("-i", expandHome(entry.identityFile), "-o", "IdentitiesOnly=yes");
+  }
+  args.push(user ? `${user}@${host}` : host, "true");
+  return args;
+}
+
+/** 试一个地址能不能建连（只看 SSH 层）。 */
+export async function probeRemoteHost(entry, host, { timeoutMs = 3000 } = {}) {
+  const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+  try {
+    await execFileAsync("ssh", probeArgs(entry, host, seconds), { timeout: timeoutMs + 2500 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 双地址选址：依次试主地址和 EasyTier 地址，把能连上的写进 resolvedHost。
+ * 最近成功的地址会缓存 10 分钟并优先重试，避免在外网每次先等内网超时。
+ */
+export async function resolveRemotes(
+  entries,
+  { probe = probeRemoteHost, timeoutMs = 3000, useCache = true } = {},
+) {
+  const cache = useCache ? readRouteCache() : {};
+  const updates = {};
+  const resolved = await Promise.all(
+    entries.map(async (entry) => {
+      const candidates = candidateHosts(entry);
+      const cached = cache[entry.host];
+      const fresh =
+        useCache &&
+        cached &&
+        Date.now() - Number(cached.at) < ROUTE_CACHE_TTL &&
+        candidates.includes(cached.host);
+      const order = fresh
+        ? [cached.host, ...candidates.filter((host) => host !== cached.host)]
+        : candidates;
+      for (const host of order) {
+        if (await probe(entry, host, { timeoutMs })) {
+          if (host !== cached?.host || !fresh) {
+            updates[entry.host] = { host, at: Date.now() };
+          }
+          return { ...entry, resolvedHost: host };
+        }
+      }
+      return { ...entry, resolvedHost: null };
+    }),
+  );
+  if (useCache && Object.keys(updates).length) writeRouteCache({ ...cache, ...updates });
+  return resolved;}
 
 
 function remoteProgram({ dryRun }) {
@@ -537,6 +684,7 @@ async function pushHost(entry, content, catalog, dryRun, { includeSecrets = fals
     return {
       host: entry.host,
       label: entry.label,
+      resolvedHost: entry.resolvedHost ?? null,
       ok: true,
       changed: !!parsed.changed,
       baseUrl: snap.baseUrl,
@@ -559,7 +707,7 @@ export async function syncRemotes({
   includeSecrets = false,
   log = console.log,
 } = {}) {
-  const hosts = loadRemotes();
+  const hosts = await resolveRemotes(loadRemotes());
   if (!hosts.length) {
     log("  未配置远程主机，跳过 SSH 同步");
     return { hosts: [] };
@@ -591,6 +739,7 @@ export async function syncRemotes({
         return {
           host: entry.host,
           label: entry.label,
+          resolvedHost: entry.resolvedHost ?? null,
           ok: true,
           changed: applied.changed,
           baseUrl: snap.baseUrl,
@@ -620,7 +769,7 @@ export async function syncRemotes({
 
 /** 只读取远程正在使用的供应商，返回名称、端点和密钥尾号。 */
 export async function inspectRemotes({ includeSecrets = false } = {}) {
-  const hosts = loadRemotes();
+  const hosts = await resolveRemotes(loadRemotes());
   const results = await Promise.all(
     hosts.map(async (entry) => {
       try {
@@ -629,6 +778,7 @@ export async function inspectRemotes({ includeSecrets = false } = {}) {
         return {
           host: entry.host,
           label: entry.label,
+          resolvedHost: entry.resolvedHost ?? null,
           ok: true,
           changed: false,
           baseUrl: snap.baseUrl,

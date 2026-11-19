@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyProviderSlice, normalizeHost, providerSnapshot } from "../src/remote-sync.mjs";
+import {
+  applyProviderSlice,
+  mergeRemotes,
+  normalizeHost,
+  providerSnapshot,
+  resolveRemotes,
+  sshArgs,
+} from "../src/remote-sync.mjs";
 
 test("normalizeHost rejects ssh option injection", () => {
   assert.equal(normalizeHost("-oProxyCommand=evil"), null);
@@ -101,4 +108,46 @@ base_url = "https://new.example/v1"
 `;
   const { text } = applyProviderSlice(remote, local);
   assert.match(text, /model_catalog_json = "\/Users\/MacBook\/\.codex\/my-own-catalog\.json"/);
+});
+
+test("known machines get both addresses", () => {
+  const lan = normalizeHost({ host: "183.175.14.217", label: "217" });
+  assert.deepEqual(lan.altHosts, ["10.126.126.3"]);
+  const et = normalizeHost({ host: "10.126.126.3", label: "3060ti" });
+  assert.ok(et.altHosts.includes("183.175.14.217"));
+  const h3c4090 = normalizeHost({ host: "183.175.14.230", label: "230" });
+  assert.deepEqual(h3c4090.altHosts, ["10.126.126.5"]);
+});
+
+test("the same machine listed by both addresses is merged once", () => {
+  const merged = mergeRemotes([], {
+    disabled: [],
+    hosts: [
+      { host: "183.175.14.217", label: "217" },
+      { host: "10.126.126.3", label: "3060ti" },
+    ],
+  });
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].host, "183.175.14.217");
+});
+
+test("resolveRemotes falls back to the EasyTier address", async () => {
+  const entry = normalizeHost({ host: "183.175.14.217", label: "217" });
+  const tried = [];
+  const resolved = await resolveRemotes([entry], {
+    useCache: false,
+    probe: async (_entry, host) => {
+      tried.push(host);
+      return host === "10.126.126.3";
+    },
+  });
+  assert.equal(resolved[0].resolvedHost, "10.126.126.3");
+  assert.deepEqual(tried, ["183.175.14.217", "10.126.126.3"]);
+});
+
+test("sshArgs targets the resolved address", () => {
+  const entry = normalizeHost({ host: "183.175.14.217", label: "217" });
+  const args = sshArgs({ ...entry, resolvedHost: "10.126.126.3" }, "print(1)");
+  assert.ok(args.includes("10.126.126.3"));
+  assert.equal(args.includes("183.175.14.217"), false);
 });

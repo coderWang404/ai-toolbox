@@ -341,6 +341,7 @@ struct RemoteStatusResult: Codable {
 struct CcSwitchHostInfo: Codable {
     let host: String
     let label: String
+    let resolvedHost: String?
     let ok: Bool
     let changed: Bool
     let pending: Bool

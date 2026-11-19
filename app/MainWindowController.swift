@@ -2050,13 +2050,18 @@ final class MainWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate,
         guard machine.enabled else { return ("pause.circle", .tertiaryLabelColor, "已暂停") }
         guard ccSyncEnabled() else { return ("pause.circle", .tertiaryLabelColor, "已关闭") }
         guard let live = ccSwitchLive[machine.host] else { return ("arrow.triangle.2.circlepath", .secondaryLabelColor, "正在检查…") }
+        // 实际走的地址和配置的主地址不同时，标出来是哪条线路
+        let route: String = {
+            guard let resolved = live.resolvedHost, resolved != machine.host else { return "" }
+            return resolved.hasPrefix("10.126.126.") ? " · EasyTier" : " · \(resolved)"
+        }()
         if live.pending {
             let waiting = live.error == "等待连接" || live.error == nil
-            return ("clock", .secondaryLabelColor, waiting ? "等待连接" : (live.error ?? "等待连接"))
+            return ("clock", .secondaryLabelColor, (waiting ? "等待连接" : (live.error ?? "等待连接")) + route)
         }
         if !live.ok { return ("exclamationmark.circle", .systemRed, live.error.map { "失败：\($0)" } ?? "失败") }
-        if live.changed { return ("checkmark.circle.fill", .systemGreen, "已按本机更新") }
-        return ("checkmark.circle.fill", .systemGreen, "已与本机一致")
+        if live.changed { return ("checkmark.circle.fill", .systemGreen, "已按本机更新" + route) }
+        return ("checkmark.circle.fill", .systemGreen, "已与本机一致" + route)
     }
 
     private func startCcSwitchFollow() {

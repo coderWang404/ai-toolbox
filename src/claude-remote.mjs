@@ -3,7 +3,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { sshArgs, loadRemotes } from "./remote-sync.mjs";
+import { sshArgs, loadRemotes, resolveRemotes } from "./remote-sync.mjs";
 import { claudeSettingsPath } from "./claude-code.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -78,7 +78,7 @@ async function syncHost(entry, env, { dryRun }) {
 
 export async function syncClaudeRemotes({ dryRun = false, log = console.log, hosts = null } = {}) {
   const local = readLocalClaudeSettings();
-  const entries = hosts ?? loadRemotes();
+  const entries = await resolveRemotes(hosts ?? loadRemotes());
   if (!entries.length) {
     log("  未配置远程主机，跳过");
     return { hosts: [], baseUrl: local.baseUrl };

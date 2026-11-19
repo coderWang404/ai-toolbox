@@ -11,12 +11,15 @@ struct RemoteMachine: Equatable {
     var identityFile: String?
     var builtin: Bool
     var enabled: Bool
+    /// 同一台机器的另一套地址（内网 ↔ EasyTier）。
+    var altHosts: [String] = []
 
     var detail: String {
         var text = ""
         if let user, !user.isEmpty { text += "\(user)@" }
         text += host
         if let port, port != 22 { text += ":\(port)" }
+        if !altHosts.isEmpty { text += " · " + altHosts.joined(separator: " · ") }
         return text
     }
 }
@@ -47,7 +50,11 @@ final class RemoteStore {
         if let cleanUser, cleanUser.hasPrefix("-") || cleanUser.contains(where: \.isWhitespace) {
             throw RemoteStoreError.invalidHost
         }
-        if machines.contains(where: { $0.host == cleanHost }) {
+        if machines.contains(where: {
+            $0.host == cleanHost ||
+            $0.altHosts.contains(cleanHost) ||
+            Self.knownAlts(cleanHost).contains($0.host)
+        }) {
             throw RemoteStoreError.duplicate
         }
         let cleanLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -58,7 +65,8 @@ final class RemoteStore {
             port: port,
             identityFile: emptyToNil(identityFile),
             builtin: false,
-            enabled: true
+            enabled: true,
+            altHosts: Self.knownAlts(cleanHost)
         ))
         save()
     }
@@ -79,6 +87,7 @@ final class RemoteStore {
             if let user = machine.user { item["user"] = user }
             if let port = machine.port { item["port"] = port }
             if let identityFile = machine.identityFile { item["identityFile"] = identityFile }
+            if !machine.altHosts.isEmpty { item["altHosts"] = machine.altHosts }
             return item
         }
         let payload: [String: Any] = ["disabled": disabled, "hosts": hosts]
@@ -107,12 +116,16 @@ final class RemoteStore {
                 port: item.port,
                 identityFile: item.identityFile,
                 builtin: true,
-                enabled: !disabled.contains(item.host)
+                enabled: !disabled.contains(item.host),
+                altHosts: item.altHosts
             )
         }
-        let seen = Set(machines.map(\.host))
-        for item in user.hosts where !seen.contains(item.host) {
+        var seen = Set(machines.map(\.host))
+        for item in user.hosts {
+            let related = Set([item.host] + item.altHosts)
+            if !seen.isDisjoint(with: related) { continue }
             machines.append(item)
+            seen.formUnion(related)
         }
         return machines
     }
@@ -146,7 +159,11 @@ final class RemoteStore {
             port: item["port"] as? Int,
             identityFile: item["identityFile"] as? String,
             builtin: true,
-            enabled: true
+            enabled: true,
+            altHosts: Self.knownAlts(
+                host,
+                extra: item["altHosts"] as? [String] ?? []
+            )
         )
     }
 
@@ -159,7 +176,11 @@ final class RemoteStore {
             port: item["port"] as? Int,
             identityFile: emptyToNil(item["identityFile"] as? String),
             builtin: false,
-            enabled: item["enabled"] as? Bool ?? true
+            enabled: item["enabled"] as? Bool ?? true,
+            altHosts: Self.knownAlts(
+                host,
+                extra: item["altHosts"] as? [String] ?? []
+            )
         )
     }
 
@@ -174,6 +195,27 @@ final class RemoteStore {
 
     private static var userFileURL: URL {
         AppPaths.dataFile("remotes.json")
+    }
+
+    /// 与 easytier-hosts 技能一致：同一台机器的内网地址和 EasyTier 地址。
+    static let dualAddresses: [String: [String]] = [
+        "183.175.14.231": ["10.126.126.2"],
+        "183.175.14.217": ["10.126.126.3"],
+        "183.175.14.219": ["10.126.126.4"],
+        "183.175.14.230": ["10.126.126.5"],
+    ]
+
+    /// 补全另一套地址；用户显式配置的 altHosts 优先保留。
+    static func knownAlts(_ host: String, extra: [String] = []) -> [String] {
+        var alts = extra.filter { !$0.isEmpty && $0 != host }
+        for (lan, ets) in dualAddresses {
+            let group = [lan] + ets
+            guard group.contains(host) else { continue }
+            for item in group where item != host && !alts.contains(item) {
+                alts.append(item)
+            }
+        }
+        return alts
     }
 
     private static let fallbackBuiltin: [RemoteMachine] = []

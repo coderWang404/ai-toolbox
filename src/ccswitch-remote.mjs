@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { loadRemotes } from "./remote-sync.mjs";
+import { loadRemotes, resolveRemotes, candidateHosts } from "./remote-sync.mjs";
 import { fingerprintSnapshot, readLocalSnapshot } from "./ccswitch-snapshot.mjs";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -435,6 +435,7 @@ function hostResult(entry, extra) {
   return {
     host: entry.host,
     label: entry.label,
+    resolvedHost: entry.resolvedHost ?? null,
     ok: false,
     changed: false,
     pending: false,
@@ -445,8 +446,17 @@ function hostResult(entry, extra) {
 }
 
 export async function syncCcSwitch({ dryRun = false, log = console.log, hosts = null, snapshot = null } = {}) {
-  const selected = new Set((hosts ?? []).filter(Boolean));
-  const entries = loadRemotes().filter((entry) => !selected.size || selected.has(entry.host) || selected.has(entry.label));
+  const selectedList = Array.isArray(hosts) ? hosts : hosts ? [hosts] : [];
+  const selected = new Set(selectedList.filter(Boolean).map(String));
+  const entries = await resolveRemotes(
+    loadRemotes().filter(
+      (entry) =>
+        !selected.size ||
+        selected.has(entry.host) ||
+        selected.has(entry.label) ||
+        candidateHosts(entry).some((host) => selected.has(host)),
+    ),
+  );
   if (!entries.length) {
     log("  没有需要同步的远程机器");
     return { hosts: [] };

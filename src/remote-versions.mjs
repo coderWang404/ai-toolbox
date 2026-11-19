@@ -9,7 +9,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { sshArgs, loadRemotes } from "./remote-sync.mjs";
+import { sshArgs, loadRemotes, resolveRemotes } from "./remote-sync.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -166,7 +166,7 @@ export async function probeHost(entry) {
 }
 
 export async function probeRemotes({ hosts = null } = {}) {
-  const list = hosts ?? loadRemotes();
+  const list = await resolveRemotes(hosts ?? loadRemotes());
   return Promise.all(list.map((entry) => probeHost(entry)));
 }
 
