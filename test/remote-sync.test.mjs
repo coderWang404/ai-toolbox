@@ -7,7 +7,9 @@ import {
   providerSnapshot,
   resolveRemotes,
   sshArgs,
+  sshTarget,
 } from "../src/remote-sync.mjs";
+import { sshPythonArgs } from "../src/ccswitch-remote.mjs";
 
 test("normalizeHost rejects ssh option injection", () => {
   assert.equal(normalizeHost("-oProxyCommand=evil"), null);
@@ -148,6 +150,24 @@ test("resolveRemotes falls back to the EasyTier address", async () => {
 test("sshArgs targets the resolved address", () => {
   const entry = normalizeHost({ host: "183.175.14.217", label: "217" });
   const args = sshArgs({ ...entry, resolvedHost: "10.126.126.3" }, "print(1)");
-  assert.ok(args.includes("10.126.126.3"));
-  assert.equal(args.includes("183.175.14.217"), false);
+  assert.ok(args.some((arg) => arg === "10.126.126.3" || arg.endsWith("@10.126.126.3")));
+  assert.equal(args.some((arg) => String(arg).includes("183.175.14.217")), false);
+});
+
+test("an alternate address inherits the primary host's ssh user", () => {
+  const entry = normalizeHost({ host: "183.175.14.230", label: "230" });
+  assert.equal(sshTarget(entry, "10.126.126.5", "tester"), "tester@10.126.126.5");
+  assert.equal(sshTarget(entry, entry.host, "tester"), "183.175.14.230");
+  const explicit = normalizeHost({ host: "183.175.14.219", label: "4080", user: "wangyiming" });
+  assert.equal(sshTarget(explicit, "10.126.126.4", "other"), "wangyiming@10.126.126.4");
+});
+
+test("cc-switch sync dials the resolved address, not the LAN host", () => {
+  const args = sshPythonArgs({
+    host: "183.175.14.217",
+    user: "server",
+    resolvedHost: "10.126.126.3",
+  });
+  assert.ok(args.includes("server@10.126.126.3"));
+  assert.equal(args.some((arg) => String(arg).includes("183.175.14.217")), false);
 });

@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { loadRemotes, resolveRemotes, candidateHosts } from "./remote-sync.mjs";
+import { loadRemotes, resolveRemotes, candidateHosts, sshTarget } from "./remote-sync.mjs";
 import { fingerprintSnapshot, readLocalSnapshot } from "./ccswitch-snapshot.mjs";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -369,13 +369,12 @@ print("CODEX_CC_JSON:" + json.dumps({"changed": changed, "fingerprint": after, "
 `;
 }
 
-function sshPythonArgs(entry) {
-  if (!entry?.host || entry.host.startsWith("-") || /[\s\x00-\x1f]/.test(entry.host)) {
-    throw new Error(`远程主机名不合法: ${entry?.host ?? ""}`);
-  }
-  if (entry.user && (entry.user.startsWith("-") || /[\s\x00-\x1f]/.test(entry.user))) {
-    throw new Error(`远程用户名不合法: ${entry.user}`);
-  }
+export function sshPythonArgs(entry) {
+  // 拨 resolveRemotes 选中的地址，不能退回主地址。
+  // 主地址命中 ~/.ssh/config 的内网 Host 时，ProxyCommand 会先 nc -z；
+  // 本机代理把内网 22 端口判成开放后，就不会再退回 EasyTier。
+  const host = entry?.resolvedHost ?? entry?.host;
+  const target = sshTarget(entry, host);
   const args = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12"];
   if (entry.port) args.push("-p", String(entry.port));
   if (entry.identityFile) {
@@ -384,7 +383,6 @@ function sshPythonArgs(entry) {
       : entry.identityFile;
     args.push("-i", file, "-o", "IdentitiesOnly=yes");
   }
-  const target = entry.user ? `${entry.user}@${entry.host}` : entry.host;
   args.push(target, "python3", "-");
   return args;
 }

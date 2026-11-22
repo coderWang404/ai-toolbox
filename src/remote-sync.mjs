@@ -2,7 +2,7 @@
 // 只替换决定请求去向的字段（模型、model_provider、[model_providers.*] 和目录字段），
 // 远程自己的项目路径、桌面设置、notify、MCP 保持不动。
 // SSH 登录走本机 ~/.ssh/config（User + IdentityFile），不在这里保存密码。
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -379,12 +379,48 @@ async function readRemoteConfig(entry) {
   return Buffer.from(encoded.slice("CODEX_CFG_B64:".length), "base64").toString("utf8");
 }
 
+const sshUserCache = new Map();
+
+/** 主地址在 ~/.ssh/config 里声明的 User。备用地址往往没有自己的 Host 块。 */
+function readSshConfigUser(host) {
+  const key = safeSshField(host);
+  if (!key) return null;
+  if (sshUserCache.has(key)) return sshUserCache.get(key);
+  let user = null;
+  try {
+    const out = execFileSync("ssh", ["-G", "-T", "-o", "BatchMode=yes", key], {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    user = safeSshField(out.match(/^user (\S+)/m)?.[1] ?? "");
+  } catch {
+    user = null;
+  }
+  sshUserCache.set(key, user);
+  return user;
+}
+
+/**
+ * 实际要拨的 user@host。
+ * 拨到和主地址不同的 IP 时，主地址的 Host 块不会再生效，用户名要单独带上。
+ * configUser 只给测试注入；不传就读 ssh config。
+ */
+export function sshTarget(entry, host, configUser = undefined) {
+  const dial = safeSshField(host);
+  if (!dial) throw new Error(`远程主机名不合法: ${entry?.host ?? ""}`);
+  const explicit = entry?.user ? safeSshField(entry.user) : null;
+  if (entry?.user && !explicit) throw new Error(`远程用户名不合法: ${entry.user}`);
+  let user = explicit;
+  if (!user && dial !== entry?.host) {
+    user = configUser === undefined ? readSshConfigUser(entry.host) : configUser;
+  }
+  return user ? `${user}@${dial}` : dial;
+}
+
 export function sshArgs(entry, program) {
   const host = safeSshField(entry.resolvedHost ?? entry.host);
-  const user = entry.user ? safeSshField(entry.user) : null;
-  if (!host || (entry.user && !user)) {
-    throw new Error(`远程主机名不合法: ${entry.host}`);
-  }
+  const target = sshTarget(entry, host);
   const payload = Buffer.from(program, "utf8").toString("base64");
   const args = [
     "-T",
@@ -400,7 +436,6 @@ export function sshArgs(entry, program) {
   if (entry.identityFile) {
     args.push("-i", expandHome(entry.identityFile), "-o", "IdentitiesOnly=yes");
   }
-  const target = user ? `${user}@${host}` : host;
   args.push(target, `python3 -c "import base64; exec(base64.b64decode('${payload}'))"`);
   return args;
 }
@@ -424,8 +459,7 @@ function writeRouteCache(map) {
 }
 
 function probeArgs(entry, host, seconds) {
-  const user = entry.user ? safeSshField(entry.user) : null;
-  if (entry.user && !user) throw new Error(`远程用户名不合法: ${entry.user}`);
+  const target = sshTarget(entry, host);
   const args = [
     "-T",
     "-o",
@@ -442,7 +476,7 @@ function probeArgs(entry, host, seconds) {
   if (entry.identityFile) {
     args.push("-i", expandHome(entry.identityFile), "-o", "IdentitiesOnly=yes");
   }
-  args.push(user ? `${user}@${host}` : host, "true");
+  args.push(target, "true");
   return args;
 }
 
