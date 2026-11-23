@@ -199,16 +199,6 @@ ai-toolbox provider-auth          # 只体检
 ai-toolbox provider-auth --fix    # 修正后重启 Codex 生效
 ```
 
-同一守卫还处理联网检索声明：Codex 默认给第三方供应商发
-`{"type":"web_search","external_web_access":true}`，部分中转（实测梦汐）会直接 400：
-
-```
-basispoints_request_invalid: 该托管工具需要原生通道；请使用原生账号，或移除不支持的声明
-```
-
-第三方供应商会被自动写成 `web_search = "disabled"`（官方供应商与 OpenAI 后端保持原样），
-这个开关也会随 `sync-remote` 一起同步到远程机器。
-
 
 cc-switch 里大多数第三方供应商没有配 `modelCatalog`，Codex 桌面端就只能显示内置模型列表，
 切过去后模型选择器里没有（或选不到）新供应商真实可用的模型。

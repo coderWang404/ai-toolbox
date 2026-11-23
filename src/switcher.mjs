@@ -12,8 +12,6 @@ import {
   setCatalogJsonField,
   catalogJsonValue,
   forceProviderAuthLocal,
-  disableWebSearch,
-  webSearchDisabled,
 } from "./toml-edit.mjs";
 import { mergeCommonConfig, isCommonConfigSubset, extractSections, stripSections } from "./common-config.mjs";
 import { buildCatalog } from "./catalog.mjs";
@@ -105,17 +103,6 @@ export function buildProviderConfig({ provider, commonConfig, apiFormat, liveCon
     }
   }
 
-  // 3b. 第三方中转普遍不认 Codex 默认的联网检索声明
-  //     （web_search + external_web_access=true 会被判成"托管工具需要原生通道"）。
-  let searchDisabled = false;
-  if (token) {
-    const fixed = disableWebSearch(text);
-    if (fixed.changed) {
-      text = fixed.text;
-      searchDisabled = true;
-    }
-  }
-
   // 4. 模型目录
   const catalog = buildCatalog({
     settings: { modelCatalog: provider.modelCatalog },
@@ -130,7 +117,7 @@ export function buildProviderConfig({ provider, commonConfig, apiFormat, liveCon
     text = setCatalogJsonField(text, false);
   }
 
-  return { text, catalog, authNormalized, searchDisabled };
+  return { text, catalog, authNormalized };
 }
 
 /** 从 TOML 文本里取顶层键值（顶层键在 cc-switch 产物里都从第 0 列开始）。 */
@@ -287,7 +274,7 @@ export async function switchProvider({
   const startedAt = Date.now();
 
   const liveConfigText = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
-  let { text, catalog, authNormalized, searchDisabled } = buildProviderConfig({
+  let { text, catalog, authNormalized } = buildProviderConfig({
     provider,
     commonConfig,
     apiFormat,
@@ -335,9 +322,6 @@ export async function switchProvider({
   if (authNormalized) {
     log("  已修正 requires_openai_auth → false（第三方供应商不再借用 ChatGPT 登录态）");
   }
-  if (searchDisabled) {
-    log('  已关闭联网检索声明（web_search = "disabled"），避免中转整轮拒绝');
-  }
   if (modelCount > 0) {
     const source = catalogSource === "provider" ? "供应商 /models" : "cc-switch 配置";
     log(`  模型目录: ${modelCount} 个模型（来源: ${source}）`);
@@ -373,8 +357,8 @@ export async function switchProvider({
 
   // 写入后立刻回读：如果配置被外部程序（通常是运行中的 cc-switch）改回去了，直接说清楚。
   let reverted = null;
-  const after = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
   {
+    const after = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
     const liveProvider = topLevelString(after, "model_provider");
     const expectedProvider = topLevelString(text, "model_provider");
     const liveBase = after.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] ?? null;
@@ -435,13 +419,6 @@ export async function switchProvider({
     warnings.push(
       "生效配置里 requires_openai_auth 仍为 true：Codex 会把 ChatGPT 登录态挂到这个供应商上，" +
         "账号菜单会显示 ChatGPT 账号，signed-out 命名空间下的侧边栏状态（远端对话等）会被隐藏",
-    );
-  }
-  // 第三方中转若保留联网检索声明，可能被整轮 400（basispoints_request_invalid）
-  if (providerTable && providerTable.requires_openai_auth !== true && !webSearchDisabled(after)) {
-    warnings.push(
-      '生效配置没有关闭联网检索（web_search = "disabled"）：部分中转会以' +
-        "「该托管工具需要原生通道」拒绝整轮请求",
     );
   }
 

@@ -171,22 +171,3 @@ test("cc-switch sync dials the resolved address, not the LAN host", () => {
   assert.ok(args.includes("server@10.126.126.3"));
   assert.equal(args.some((arg) => String(arg).includes("183.175.14.217")), false);
 });
-
-test("web_search switch is carried to the remote", () => {
-  const remote = `model_provider = "old"
-model = "old-model"
-
-[model_providers.old]
-name = "Old"
-`;
-  const local = `model_provider = "new"
-model = "new-model"
-web_search = "disabled"
-
-[model_providers.new]
-name = "New"
-base_url = "https://new.example/v1"
-`;
-  const { text } = applyProviderSlice(remote, local);
-  assert.match(text, /web_search = "disabled"/);
-});

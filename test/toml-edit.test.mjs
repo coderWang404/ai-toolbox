@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { injectBearerToken, parseSectionHeader, setCatalogJsonField, tomlString, catalogJsonValue, providerAuthState, forceProviderAuthLocal, isOpenAiBackendUrl, disableWebSearch, webSearchDisabled } from "../src/toml-edit.mjs";
+import { injectBearerToken, parseSectionHeader, setCatalogJsonField, tomlString, catalogJsonValue, providerAuthState, forceProviderAuthLocal, isOpenAiBackendUrl } from "../src/toml-edit.mjs";
 
 test("tomlString escapes quotes, backslashes and newlines", () => {
   assert.equal(tomlString('a"b\\c\nd'), '"a\\"b\\\\c\\nd"');
@@ -143,57 +143,4 @@ requires_openai_auth = true
   assert.equal(isOpenAiBackendUrl("https://chatgpt.com/backend-api"), true);
   assert.equal(isOpenAiBackendUrl("https://api.mengxiapi.com/v1"), false);
   assert.equal(isOpenAiBackendUrl("https://notopenai.com/v1"), false);
-});
-
-// ---- 联网检索声明（web_search）----
-
-test("disableWebSearch inserts the key for a third-party provider", () => {
-  const config = `model_provider = "custom"
-model = "m"
-
-[model_providers.custom]
-base_url = "https://api.example.com/v1"
-requires_openai_auth = false
-`;
-  const { text, changed } = disableWebSearch(config);
-  assert.equal(changed, true);
-  assert.match(text, /^web_search = "disabled"$/m);
-  // 插在第一个 section 之前
-  assert.ok(text.indexOf('web_search = "disabled"') < text.indexOf("[model_providers.custom]"));
-  assert.equal(disableWebSearch(text).changed, false);
-});
-
-test("disableWebSearch rewrites an existing value", () => {
-  const config = `model_provider = "custom"
-web_search = "live"
-
-[model_providers.custom]
-base_url = "https://api.example.com/v1"
-`;
-  const { text, changed } = disableWebSearch(config);
-  assert.equal(changed, true);
-  assert.match(text, /web_search = "disabled"/);
-  assert.equal(text.includes('"live"'), false);
-});
-
-test("disableWebSearch leaves official providers alone", () => {
-  const config = `model_provider = "openai"
-[model_providers.openai]
-base_url = "https://chatgpt.com/backend-api"
-`;
-  assert.equal(disableWebSearch(config).changed, false);
-});
-
-test("disableWebSearch can be forced", () => {
-  const config = `model_provider = "openai"
-[model_providers.openai]
-base_url = "https://chatgpt.com/backend-api"
-`;
-  assert.equal(disableWebSearch(config, { force: true }).changed, true);
-});
-
-test("webSearchDisabled recognises the disabled value", () => {
-  assert.equal(webSearchDisabled(`model_provider = "x"\nweb_search = "disabled"\n`), true);
-  assert.equal(webSearchDisabled(`model_provider = "x"\nweb_search = "live"\n`), false);
-  assert.equal(webSearchDisabled(`model_provider = "x"\n`), false);
 });

@@ -365,57 +365,6 @@ export function forceProviderAuthLocal(text) {
   return { text: changed ? lines.join("\n") : text, changed };
 }
 
-/**
- * 第三方中转对 `web_search` 的处理能力不一致：
- * - Codex 默认会声明 `{"type":"web_search","external_web_access":true}`（联网检索）
- * - 部分中转（例如梦汐）对带 external 的声明直接 400：
- *   `basispoints_request_invalid: 该托管工具需要原生通道；请使用原生账号，或移除不支持的声明`
- * - 同一个 key 换成 `web_search = "disabled"` 后不再声明该工具，请求恢复正常
- * 这里读当前是否显式关闭了联网检索。
- */
-export function webSearchDisabled(text) {
-  const lines = text.split(/\r?\n/);
-  const idx = topLevelKeyLine(lines, "web_search");
-  if (idx === -1) return false;
-  const raw = lines[idx].slice(lines[idx].indexOf("=") + 1).trim();
-  const quoted = raw.match(/^"([^"]*)"/);
-  const value = (quoted ? quoted[1] : raw.replace(/\s+#.*$/, "")).trim().toLowerCase();
-  return value === "disabled";
-}
-
-/**
- * 把联网检索关掉（`web_search = "disabled"`）。
- * 官方供应商保留原样；第三方中转默认关闭，避免被中转拒绝整轮请求。
- * @returns {{text: string, changed: boolean}}
- */
-export function disableWebSearch(text, { force = false } = {}) {
-  const state = providerAuthState(text);
-  if (!force && (!state || state.reserved || state.openAiBackend)) {
-    return { text, changed: false };
-  }
-  const lines = text.split(/\r?\n/);
-  const assignment = 'web_search = "disabled"';
-  const idx = topLevelKeyLine(lines, "web_search");
-  if (idx !== -1) {
-    if (/^\s*web_search\s*=\s*"disabled"\s*$/i.test(lines[idx])) return { text, changed: false };
-    const indent = lines[idx].match(/^\s*/)[0];
-    lines[idx] = `${indent}${assignment}`;
-    return { text: lines.join("\n"), changed: true };
-  }
-  // 插在顶层键末尾（第一个 section 之前），保持文件形状
-  let insertAt = lines.length;
-  for (let i = 0; i < lines.length; i++) {
-    if (!isCommentOrBlank(lines[i]) && parseSectionHeader(lines[i])) {
-      insertAt = i;
-      break;
-    }
-  }
-  let j = insertAt;
-  while (j > 0 && isCommentOrBlank(lines[j - 1])) j--;
-  lines.splice(j, 0, assignment);
-  return { text: lines.join("\n"), changed: true };
-}
-
 function catalogValue(lines, idx) {
   const raw = lines[idx].slice(lines[idx].indexOf("=") + 1).trim();
   if (raw.startsWith('"')) {
