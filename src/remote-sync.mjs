@@ -19,6 +19,8 @@ const SYNC_TOP_KEYS = [
   "model_reasoning_effort",
   "disable_response_storage",
   "model_catalog_json",
+  // 第三方中转普遍不认默认的联网检索声明，同步时必须带上这个开关
+  "web_search",
 ];
 
 const CATALOG_FILENAME = "cc-switch-model-catalog.json";

@@ -631,26 +631,36 @@ async function cmdProviderAuth(opts) {
       return { command: "provider-auth", ...result };
     }
     const p = result.provider;
+    const thirdParty = !p.reserved && !p.openAiBackend;
     opts.log(`\n当前供应商: ${p.name ?? p.providerId} (${p.providerId})`);
     opts.log(`  base_url: ${p.baseUrl ?? "未设置"}`);
     opts.log(`  requires_openai_auth: ${p.requiresOpenaiAuth ? "true" : "false"}`);
     opts.log(`  bearer token: ${p.hasBearerToken ? "已配置" : "未配置"}`);
-    opts.log(`  ${explainProviderAuth(p)}`);
+    opts.log(`  联网检索: ${result.searchNeedsFix ? "开启（中转可能拒绝整轮请求）" : "已关闭或不需要"}`);
+    opts.log(`  ${explainProviderAuth(p, { webSearchDisabled: !result.searchNeedsFix })}`);
     if (fixedNow) {
-      opts.log("\n✅ 已修正为 false；重启 Codex 后生效（ai-toolbox reload 会自动重启）。");
+      const what = (guarded.applied ?? []).map((item) =>
+        item === "web_search" ? '已关闭联网检索（web_search = "disabled"）' : "requires_openai_auth 已改为 false",
+      );
+      opts.log(`\n✅ ${what.join("；")}。重启 Codex 后生效（ai-toolbox reload 会自动重启）。`);
     } else if (guarded.blocked) {
       opts.log(
         "\n⚠️  这个供应商没有自带凭证，requires_openai_auth=true 未自动修改；" +
           "如果它确实靠 ChatGPT 登录，请保持现状。",
       );
     } else if (guarded.needsFix) {
-      opts.log(
-        "\n⚠️  这行会让 Codex 借用 ChatGPT 登录身份，按身份寄存的侧边栏状态（远端对话等）会读不到。\n   修复: ai-toolbox provider-auth --fix",
-      );
-    } else if (p.reserved) {
-      opts.log("\n✅ 官方供应商，保持 ChatGPT 登录态。");
-    } else {
-      opts.log("\n✅ 第三方供应商没有借用 ChatGPT 登录态。");
+      const reasons = [];
+      if (guarded.authNeedsFix) {
+        reasons.push("requires_openai_auth=true 会让 Codex 借用 ChatGPT 登录身份，按身份寄存的侧边栏状态（远端对话等）会读不到");
+      }
+      if (guarded.searchNeedsFix) {
+        reasons.push('联网检索默认开启，部分中转会以「该托管工具需要原生通道」拒绝整轮请求');
+      }
+      opts.log(`\n⚠️  ${reasons.join("；")}。\n   修复: ai-toolbox provider-auth --fix`);
+    } else if (p.reserved || p.openAiBackend) {
+      opts.log("\n✅ 官方供应商，保持 ChatGPT 登录态与联网检索。");
+    } else if (thirdParty) {
+      opts.log("\n✅ 第三方供应商：没有借用 ChatGPT 登录态，联网检索已关闭。");
     }
   }
   return { command: "provider-auth", ...result };

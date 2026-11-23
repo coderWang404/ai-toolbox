@@ -116,3 +116,29 @@ requires_openai_auth = true
   });
   assert.equal(authNormalized, false);
 });
+
+test("third-party provider config gets web_search disabled", () => {
+  const provider = {
+    id: "p",
+    name: "Relay",
+    config: `model_provider = "p"
+model = "m"
+
+[model_providers.p]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+requires_openai_auth = false
+`,
+    auth: { OPENAI_API_KEY: "sk-relay" },
+    meta: {},
+  };
+  const { text, searchDisabled } = buildProviderConfig({
+    provider,
+    commonConfig: null,
+    apiFormat: null,
+    liveConfigText: null,
+    dryRun: true,
+  });
+  assert.equal(searchDisabled, true);
+  assert.match(text, /web_search = "disabled"/);
+});
